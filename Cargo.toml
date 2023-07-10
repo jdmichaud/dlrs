@@ -11,3 +11,8 @@ error-chain = "0.12.4"
 futures = "0.3.28"
 reqwest = { version = "0.11.18", features = ['blocking'] }
 tokio = { version = "1.29.1", features = ["full"] }
+
+[[bin]]
+name = "dlrs"
+path = "main.rs"
+
