@@ -57,14 +57,17 @@ enum State {
   Done,
 }
 
-#[derive(Debug, Clone, Copy)]
-struct Job<'a> {
-  url: &'a str,
-  filename: &'a str,
+#[derive(Debug, Clone)]
+struct Job {
+  url: String,
+  filename: String,
   state: State,
 }
 
 fn update_display(jobs: &Vec<Job>) -> Result<()> {
+  if jobs.len() == 0 {
+    return Ok(())
+  }
   // This function has no state so we have to recompute a bunch of things every time.
   let max_filename_length = jobs.iter().map(|job| job.filename.len()).fold(std::i32::MIN, |a,b| a.max(b as i32));
   let terminal_size = crossterm::terminal::size()?;
@@ -75,13 +78,13 @@ fn update_display(jobs: &Vec<Job>) -> Result<()> {
     match job.state {
       State::Wait => println!("{:width$}waiting", "", width = progress_bar_width),
       State::Downloading(progress) => {
-        let nbhash = ((progress_bar_width - 1) as f32 * progress as f32 / 100.0) as u8;
+        let nbhash = ((progress_bar_width) as f32 * progress as f32 / 100.0) as u8;
         let progress_bar = (0..nbhash).map(|_| "#").collect::<String>();
-        println!("{:width$}downloading {}%", progress_bar, progress, width = progress_bar_width);
+        println!("[{:width$}] {}%", progress_bar, progress, width = progress_bar_width);
       },
       State::Done => {
-        let full_progress_bar = (0..progress_bar_width - 1).map(|_| "#").collect::<String>();
-        println!("{:width$}done.", full_progress_bar, width = progress_bar_width);
+        let full_progress_bar = (0..progress_bar_width).map(|_| "#").collect::<String>();
+        println!("[{:width$}] done.", full_progress_bar, width = progress_bar_width);
       }
     }
   }
@@ -90,11 +93,11 @@ fn update_display(jobs: &Vec<Job>) -> Result<()> {
   Ok(())
 }
 
-async fn download<'a>(jobs: &Rc<RefCell<Vec<Job<'a>>>>, job_index: usize) -> Result<()> {
+async fn download(jobs: &Rc<RefCell<Vec<Job>>>, job_index: usize) -> Result<()> {
   const CHUNK_SIZE: u32 = 1024 * 30;
   
-  let url = jobs.borrow_mut()[job_index].url;
-  let filename = jobs.borrow_mut()[job_index].filename;
+  let url = &jobs.borrow()[job_index].url.clone();
+  let filename = &jobs.borrow()[job_index].filename.clone();
 
   let client = reqwest::Client::new();
   let response = client.head(url).send().await?;
@@ -103,42 +106,64 @@ async fn download<'a>(jobs: &Rc<RefCell<Vec<Job<'a>>>>, job_index: usize) -> Res
     .get(CONTENT_LENGTH)
     .ok_or("response doesn't include the content length")?;
   let length = u64::from_str(length.to_str()?).map_err(|_| "invalid Content-Length header")?;
-    
+  println!("length {}", length);
   let mut output_file = File::create(filename)?;
     
   jobs.borrow_mut()[job_index].state = State::Downloading(0);
   update_display(&jobs.borrow())?;
   for range in PartialRangeIter::new(0, length - 1, CHUNK_SIZE)? {
+    println!("range {:?}", range);
     let range_header = HeaderValue::from_str(&format!("bytes={}-{}", range.start, range.end))
       .expect("string provided by format!");
+    println!("dl 1");
     let response = client.get(url).header(RANGE, range_header).send().await?;
+    println!("dl 2");
     
     let status = response.status();
     if !(status == StatusCode::OK || status == StatusCode::PARTIAL_CONTENT) {
+      println!("status {}", status);
       error_chain::bail!("Unexpected server response: {}", status)
     }
+    println!("dl 3");
 
     let content = response.text().await?;
     std::io::copy(&mut content.as_bytes(), &mut output_file)?;
+    println!("dl 4");
     jobs.borrow_mut()[job_index].state = State::Downloading((range.start as f32 / length as f32 * 100.0) as u8);
+    println!("dl 5");
     update_display(&jobs.borrow())?;
+    println!("dl 6");
   }
     
   Ok(())
 }
 
-async fn unzip<'a>(jobs: &Rc<RefCell<Vec<Job<'a>>>>, job_index: usize) -> Result<()> {
+async fn unzip(_jobs: &Rc<RefCell<Vec<Job>>>, _job_index: usize) -> Result<()> {
   Ok(())
 }
 
 // Will asynchronously call the various functions of the provided job.
 // It is the responsibility of these function to call update_display regularly.
-async fn process<'a>(jobs: &Rc<RefCell<Vec<Job<'a>>>>, job_index: usize) -> Result<()> {
+async fn process(jobs: &Rc<RefCell<Vec<Job>>>, job_index: usize) -> Result<()> {
   download(jobs, job_index).await?;
   unzip(jobs, job_index).await?;
   jobs.borrow_mut()[job_index].state = State::Done;
   update_display(&jobs.borrow())?;
   Ok(())
+}
+
+pub const SITE_LIST: &str = include_str!("site.list");
+
+fn create_job_list() -> Vec<Job> {
+  SITE_LIST.lines()
+    .map(|line| line.trim())
+    .filter(|line| !line.starts_with('#'))
+    .filter(|line| line.len() != 0)
+    .map(|line| {
+      let split = line.split_whitespace().map(|s| s).collect::<Vec<&str>>();
+      Job { url: split[1].to_string(), filename: split[0].to_string(), state: State::Wait }
+    })
+    .collect()
 }
 
 #[tokio::main]
@@ -152,11 +177,12 @@ async fn main() -> Result<()> {
     std::process::exit(0);
   }).expect("Error setting Ctrl-C handler");
 
-  let jobs = Rc::new(RefCell::new(vec![
-    Job { url: "http://speedtest.ftp.otenet.gr/files/test100k.db", filename: "test100k.db", state: State::Wait },
-    Job { url: "http://speedtest.ftp.otenet.gr/files/test1Mb.db", filename: "test1Mb.db", state: State::Wait },
-    Job { url: "http://speedtest.ftp.otenet.gr/files/test10Mb.db", filename: "test10Mb.db", state: State::Wait },
-  ]));
+  let jobs = Rc::new(RefCell::new(create_job_list()));
+  // let jobs = Rc::new(RefCell::new(vec![
+    // Job { url: "http://speedtest.ftp.otenet.gr/files/test100k.db", filename: "test100k.db", state: State::Wait },
+    // Job { url: "http://speedtest.ftp.otenet.gr/files/test1Mb.db", filename: "test1Mb.db", state: State::Wait },
+    // Job { url: "http://speedtest.ftp.otenet.gr/files/test10Mb.db", filename: "test10Mb.db", state: State::Wait },
+  // ]));
   update_display(&jobs.borrow())?;
 
   let nbjobs = jobs.borrow().len();
