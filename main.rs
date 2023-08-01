@@ -1,7 +1,10 @@
+use chrono::{DateTime, Utc};
+use chrono::serde::{ts_seconds, ts_seconds_option};
 use error_chain::error_chain;
 use futures::StreamExt;
 use reqwest::header::{HeaderValue, CONTENT_LENGTH, RANGE};
 use reqwest::StatusCode;
+use serde::Deserialize;
 use std::fs::File;
 use std::io::stdout;
 use std::str::FromStr;
@@ -63,6 +66,223 @@ struct Job {
   filename: String,
   state: State,
 }
+
+#[derive(Debug, Deserialize)]
+enum BadgeClass {
+  Gold = 1,
+  Silver = 2,
+  Bronze = 3,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "PascalCase")]
+struct Badge {
+  id: String,
+  user_id: String,
+  name: String, 
+  date: DateTime<Utc>, 
+  class: BadgeClass,
+  TagBased: bool, // true if is for a tag
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "PascalCase")]
+struct Comment {
+  id: String,
+  post_id: String,
+  score: i64,
+  text: String, 
+  #[serde(with = "ts_seconds")]
+  creation_date: DateTime<Utc>, 
+  // populated if a user has been removed and no longer referenced by user Id
+  user_display_name: String,
+  user_id: String,
+}
+
+#[derive(Debug, Deserialize)]
+enum PostHistoryType {
+  InitialTitle = 1, // The first title a question is asked with.
+  InitialBody = 2, // The first raw body text a post is submitted with.
+  InitialTags = 3, // The first tags a question is asked with.
+  EditTitle = 4, // A question's title has been changed.
+  EditBody = 5, // A post's body has been changed, the raw text is stored here as markdown.
+  EditTags = 6, // A question's tags have been changed.
+  RollbackTitle = 7, // A question's title has reverted to a previous version.
+  RollbackBody = 8, // A post's body has reverted to a previous version - the raw text is stored here.
+  RollbackTags = 9, // A question's tags have reverted to a previous version.
+  PostClosed = 10, // A post was voted to be closed.
+  PostReopened = 11, // A post was voted to be reopened.
+  PostDeleted = 12, // A post was voted to be removed.
+  PostUndeleted = 13, // A post was voted to be restored.
+  PostLocked = 14, // A post was locked by a moderator.
+  PostUnlocked = 15, // A post was unlocked by a moderator.
+  CommunityOwned = 16, // A post has become community owned.
+  PostMigrated = 17, // A post was migrated.
+  QuestionMerged = 18, // A question has had another, deleted question merged into itself.
+  QuestionProtected = 19, // A question was protected by a moderator
+  QuestionUnprotected = 20, // A question was unprotected by a moderator
+  PostDisassociated = 21, // An admin removes the OwnerUserId from a post.
+  QuestionUnmerged = 22, // A previously merged question has had its answers and votes restored.
+  SuggestedEditApplied = 24,
+  PostTweeted = 25,
+  MovedToChat = 31,
+  PostNoticeAdded = 33, // Post notice added comment contains foreign key to PostNotices
+  PostNoticeRemoved = 34, // Post notice removed comment contains foreign key to PostNotices
+  PostMigratedAway = 35, // (replaces id 17)
+  PostMigratedHere = 36, // (replaces id 17)
+  PostMergeSource = 37,
+  PostMergeDestination = 38,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "PascalCase")]
+struct PostHistory {
+  id: String,
+  post_history_type: PostHistoryType,
+  post_id: String,
+  // At times more than one type of history record can be recorded by a single action.  All of these will be grouped using the same RevisionGUID
+  revision_guid: String,
+  creation_date: DateTime<Utc>,
+  user_id: String,
+  // populated if a user has been removed and no longer referenced by user Id
+  user_display_name: Option<String>,
+  // This field will contain the comment made by the user who edited a post
+  comment: String,
+  // A raw version of the new value for a given revision
+  // - If PostHistoryTypeId = 10, 11, 12, 13, 14, or 15  this column will contain a JSON encoded string with all users who have voted for the PostHistoryTypeId
+  // - If PostHistoryTypeId = 17 this column will contain migration details of either "from <url>" or "to <url>"
+  text: String,
+}
+
+#[derive(Debug, Deserialize)]
+enum LinkType {
+  Linked = 1,
+  Duplicate = 3,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "PascalCase")]
+struct PostLink {
+ id: String,
+ creation_date: DateTime<Utc>,
+ post_id: String,
+ related_post_id: String,
+ link_type_id: LinkType,
+}
+
+#[derive(Debug, Deserialize)]
+enum PostType {
+  Question = 1,
+  Answer = 2,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "PascalCase")]
+struct Post {
+  id: String,
+  post_type_id: PostType,
+  // only present if PostTypeId is 2
+  parent_id: Option<String>,
+  // only present if PostTypeId is 1
+  accepted_answer_id: Option<String>,
+  #[serde(with = "ts_seconds")]
+  creation_date: DateTime<Utc>,
+  #[serde(with = "ts_seconds_option")]
+  deletion_date: Option<DateTime<Utc>>,
+  score: i64,
+  view_count: i64,
+  body: String,
+  owner_user_id: String,
+  // populated if a user has been removed and no longer referenced by user Id or if the user was anonymous
+  owner_display_name: Option<String>,
+  last_editor_user_id: String,
+  last_editor_display_name: String, 
+  #[serde(with = "ts_seconds")]
+  last_edit_date: DateTime<Utc>, // "2009-03-05T22:28:34.823" 
+  #[serde(with = "ts_seconds")]
+  last_activity_date: DateTime<Utc>, // "2009-03-11T12:51:01.480" 
+  title: String,
+  tags: String,
+  answer_count: i64,
+  comment_count: i64,
+  favorite_count: i64,
+  // populated if the post is closed
+  #[serde(with = "ts_seconds_option")]
+  closed_date: Option<DateTime<Utc>>,
+  // populated if post is community wikied
+  #[serde(with = "ts_seconds_option")]
+  community_owned_date: Option<DateTime<Utc>>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "PascalCase")]
+struct Tag {
+  id: String,
+  tag_name: String,
+  count: i64,
+  // if an Excerpt is created
+  excerpt_post_id: Option<String>,
+  // if an Wiki is created
+  wiki_post_id: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "PascalCase")]
+struct User {
+  id: String,
+  reputation: i64,
+  #[serde(with = "ts_seconds")]
+  creation_date: DateTime<Utc>,
+  display_name: String,
+  email_hash: String,
+  profile_image_url: String,
+  #[serde(with = "ts_seconds")]
+  last_access_date: DateTime<Utc>,
+  website_url: String,
+  location: String,
+  age: u8,
+  about_me: String,
+  views: u32,
+  up_votes: u32,
+  down_votes: u32,
+  account_id: String,
+}
+
+#[derive(Debug, Deserialize)]
+enum VoteType {
+  AcceptedByOriginator = 1,
+  UpMod = 2, //  upvote
+  DownMod = 3, // downvote
+  Offensive = 4,
+  Favorite = 5,
+  Close = 6,
+  Reopen = 7,
+  BountyStart = 8,
+  BountyClose = 9,
+  Deletion = 10,
+  Undeletion = 11,
+  Spam = 12,
+  InformModerator = 13,
+  ModeratorReview = 15,
+  ApproveEditSuggestion = 16,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "PascalCase")]
+struct Vote { 
+ id: String,
+ post_id: String,
+ vote_type_id: VoteType,
+ creation_date: DateTime<Utc>,
+ // only for VoteTypeId 5
+  #[serde(with = "ts_seconds_option")]
+ user_id: Option<DateTime<Utc>>,
+ // only for VoteTypeId 9
+  #[serde(with = "ts_seconds_option")]
+ bounty_amount: Option<DateTime<Utc>>,
+}
+
+
 
 fn update_display(jobs: &Vec<Job>) -> Result<()> {
   if jobs.len() == 0 {
