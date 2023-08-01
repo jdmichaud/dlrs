@@ -1,5 +1,5 @@
 use error_chain::error_chain;
-use futures::future;
+use futures::StreamExt;
 use reqwest::header::{HeaderValue, CONTENT_LENGTH, RANGE};
 use reqwest::StatusCode;
 use std::fs::File;
@@ -106,33 +106,25 @@ async fn download(jobs: &Rc<RefCell<Vec<Job>>>, job_index: usize) -> Result<()> 
     .get(CONTENT_LENGTH)
     .ok_or("response doesn't include the content length")?;
   let length = u64::from_str(length.to_str()?).map_err(|_| "invalid Content-Length header")?;
-  println!("length {}", length);
   let mut output_file = File::create(filename)?;
     
   jobs.borrow_mut()[job_index].state = State::Downloading(0);
   update_display(&jobs.borrow())?;
   for range in PartialRangeIter::new(0, length - 1, CHUNK_SIZE)? {
-    println!("range {:?}", range);
     let range_header = HeaderValue::from_str(&format!("bytes={}-{}", range.start, range.end))
       .expect("string provided by format!");
-    println!("dl 1");
     let response = client.get(url).header(RANGE, range_header).send().await?;
-    println!("dl 2");
     
     let status = response.status();
     if !(status == StatusCode::OK || status == StatusCode::PARTIAL_CONTENT) {
       println!("status {}", status);
       error_chain::bail!("Unexpected server response: {}", status)
     }
-    println!("dl 3");
 
     let content = response.text().await?;
     std::io::copy(&mut content.as_bytes(), &mut output_file)?;
-    println!("dl 4");
     jobs.borrow_mut()[job_index].state = State::Downloading((range.start as f32 / length as f32 * 100.0) as u8);
-    println!("dl 5");
     update_display(&jobs.borrow())?;
-    println!("dl 6");
   }
     
   Ok(())
@@ -174,22 +166,26 @@ async fn main() -> Result<()> {
   ctrlc::set_handler(|| {
     let _ = crossterm::execute!(stdout(), crossterm::cursor::Show);
     // We need to force exit here which is what the default handler does.
+    println!("interrupted");
     std::process::exit(0);
   }).expect("Error setting Ctrl-C handler");
 
   let jobs = Rc::new(RefCell::new(create_job_list()));
   // let jobs = Rc::new(RefCell::new(vec![
-    // Job { url: "http://speedtest.ftp.otenet.gr/files/test100k.db", filename: "test100k.db", state: State::Wait },
-    // Job { url: "http://speedtest.ftp.otenet.gr/files/test1Mb.db", filename: "test1Mb.db", state: State::Wait },
-    // Job { url: "http://speedtest.ftp.otenet.gr/files/test10Mb.db", filename: "test10Mb.db", state: State::Wait },
+  //   Job { url: "http://speedtest.ftp.otenet.gr/files/test100k.db".to_string(), filename: "test100k.db".to_string(), state: State::Wait },
+  //   Job { url: "http://speedtest.ftp.otenet.gr/files/test1Mb.db".to_string(), filename: "test1Mb.db".to_string(), state: State::Wait },
+  //   Job { url: "http://speedtest.ftp.otenet.gr/files/test10Mb.db".to_string(), filename: "test10Mb.db".to_string(), state: State::Wait },
   // ]));
   update_display(&jobs.borrow())?;
 
   let nbjobs = jobs.borrow().len();
   // We convert the jobs to futures that we will wait simultaneously
-  let tasks = (0..nbjobs).map(|index| process(&jobs, index));
+  // Concurrent requests (https://gist.github.com/joseluisq/e7f926d73e02fb9dd6114f4d8be6607d)
+  let tasks = futures::stream::iter(
+    (0..nbjobs).map(|index| process(&jobs, index))
+  ).buffer_unordered(3).collect::<Vec<_>>();
   // Waiting on all the future
-  future::join_all(tasks).await;
+  tasks.await;
   
   crossterm::execute!(stdout(), crossterm::cursor::Show)?;
   Ok(())
