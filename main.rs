@@ -11,19 +11,19 @@ use sevenz_rust;
 use std::fs::File;
 use std::io::{stdout, Write};
 use std::str::FromStr;
-use std::rc::Rc;
-use std::cell::RefCell;
+use std::sync::{Arc, Mutex};
 use std::path::{Path, PathBuf};
 use tokio;
 
 mod se_struct;
 
-#[derive(Parser)]
+#[derive(Parser, Clone)]
 #[command(author, version, about, long_about = None)]
 struct Config {
   /// Where to store Stack Exchange files (zipped and unzipped)
   #[arg(short, long, default_value=PathBuf::from("./data").into_os_string(), value_name = "PATH")]
   data_path: PathBuf,
+  /// List of files/urls to download
   #[arg(short, long, default_value=PathBuf::from("site.list").into_os_string(), value_name = "FILE")]
   site_list: PathBuf,
 }
@@ -141,11 +141,11 @@ fn get_data_path(filepath: &Path) -> PathBuf {
   output_path
 }
 
-async fn download(_config: &Config, jobs: &Rc<RefCell<Vec<Job>>>, job_index: usize) -> Result<()> {
+async fn download(_config: &Config, jobs: &Arc<Mutex<Vec<Job>>>, job_index: usize) -> Result<()> {
   const CHUNK_SIZE: u32 = 1024 * 1024;
 
-  let url = &jobs.borrow()[job_index].url.clone();
-  let filename = &jobs.borrow()[job_index].filepath.clone();
+  let url = &jobs.lock().unwrap()[job_index].url.clone();
+  let filename = &jobs.lock().unwrap()[job_index].filepath.clone();
 
   let client = reqwest::Client::new();
   let response = client.head(url).send().await?;
@@ -156,8 +156,8 @@ async fn download(_config: &Config, jobs: &Rc<RefCell<Vec<Job>>>, job_index: usi
   let length = u64::from_str(length.to_str()?).map_err(|_| "invalid Content-Length header")?;
   let mut output_file = std::io::BufWriter::new(File::create(filename)?);
 
-  jobs.borrow_mut()[job_index].state = State::Downloading(0);
-  update_display(&jobs.borrow())?;
+  jobs.lock().unwrap()[job_index].state = State::Downloading(0);
+  update_display(&jobs.lock().unwrap())?;
   for range in PartialRangeIter::new(0, length - 1, CHUNK_SIZE)? {
   // for range in PartialRangeIter::new(0, length - 1, (length / 100) as u32)? {
     let range_header = HeaderValue::from_str(&format!("bytes={}-{}", range.start, range.end))
@@ -172,15 +172,15 @@ async fn download(_config: &Config, jobs: &Rc<RefCell<Vec<Job>>>, job_index: usi
 
     let content = bytes::Bytes::from(response.bytes().await?);
     std::io::copy(&mut content.reader(), &mut output_file)?;
-    jobs.borrow_mut()[job_index].state = State::Downloading((range.start as f32 / length as f32 * 100.0) as u8);
-    update_display(&jobs.borrow())?;
+    jobs.lock().unwrap()[job_index].state = State::Downloading((range.start as f32 / length as f32 * 100.0) as u8);
+    update_display(&jobs.lock().unwrap())?;
   }
 
   Ok(())
 }
 
-async fn unzip(_config: &Config, jobs: &Rc<RefCell<Vec<Job>>>, job_index: usize) -> Result<()> {
-  let filepath = &jobs.borrow()[job_index].filepath.clone();
+async fn unzip(_config: &Config, jobs: &Arc<Mutex<Vec<Job>>>, job_index: usize) -> Result<()> {
+  let filepath = &jobs.lock().unwrap()[job_index].filepath.clone();
   // sevenz_rust::decompress_file(filepath, get_data_path(&PathBuf::from(filepath))).map_err(|e| e.to_string())?;
 
   // https://github.com/dyz1990/sevenz-rust/blob/main/examples/decompress_progress.rs
@@ -206,139 +206,139 @@ async fn unzip(_config: &Config, jobs: &Rc<RefCell<Vec<Job>>>, job_index: usize)
       }
       file.write_all(&buf[..read_size])?;
       uncompressed_size += read_size;
-      jobs.borrow_mut()[job_index].state = State::Unzipping(((uncompressed_size as f32 / total_size as f32) * 100.0) as u8);
-      update_display(&jobs.borrow()).unwrap(); // TODO: get rid of unwrap
+      jobs.lock().unwrap()[job_index].state = State::Unzipping(((uncompressed_size as f32 / total_size as f32) * 100.0) as u8);
+      update_display(&jobs.lock().unwrap()).unwrap(); // TODO: get rid of unwrap
     }
   })?;
 
   Ok(())
 }
 
-async fn parse(_config: &Config, jobs: &Rc<RefCell<Vec<Job>>>, job_index: usize) -> Result<()> {
-  jobs.borrow_mut()[job_index].state = State::Parsing(0);
-  update_display(&jobs.borrow())?;
+async fn parse(_config: &Config, jobs: &Arc<Mutex<Vec<Job>>>, job_index: usize) -> Result<()> {
+  jobs.lock().unwrap()[job_index].state = State::Parsing(0);
+  update_display(&jobs.lock().unwrap())?;
 
   let _badges = {
-    let mut filepath = get_data_path(&PathBuf::from(&jobs.borrow()[job_index].filepath));
+    let mut filepath = get_data_path(&PathBuf::from(&jobs.lock().unwrap()[job_index].filepath));
     filepath.push("Badges.xml");
     let f = File::open(filepath.to_string_lossy().to_string())?;
     let reader = std::io::BufReader::new(f);
     let badges: se_struct::Badges = quick_xml::de::from_reader(reader)?;
     badges.row
   };
-  jobs.borrow_mut()[job_index].state = State::Parsing(10);
-  update_display(&jobs.borrow())?;
+  jobs.lock().unwrap()[job_index].state = State::Parsing(10);
+  update_display(&jobs.lock().unwrap())?;
 
   let _comments = {
-    let mut filepath = get_data_path(&PathBuf::from(&jobs.borrow()[job_index].filepath));
+    let mut filepath = get_data_path(&PathBuf::from(&jobs.lock().unwrap()[job_index].filepath));
     filepath.push("Comments.xml");
     let f = File::open(filepath.to_string_lossy().to_string())?;
     let reader = std::io::BufReader::new(f);
     let comments: se_struct::Comments = quick_xml::de::from_reader(reader)?;
     comments.row
   };
-  jobs.borrow_mut()[job_index].state = State::Parsing(20);
-  update_display(&jobs.borrow())?;
+  jobs.lock().unwrap()[job_index].state = State::Parsing(20);
+  update_display(&jobs.lock().unwrap())?;
 
   let _post_histories = {
-    let mut filepath = get_data_path(&PathBuf::from(&jobs.borrow()[job_index].filepath));
+    let mut filepath = get_data_path(&PathBuf::from(&jobs.lock().unwrap()[job_index].filepath));
     filepath.push("PostHistory.xml");
     let f = File::open(filepath.to_string_lossy().to_string())?;
     let reader = std::io::BufReader::new(f);
     let _post_histories: se_struct::PostHistories = quick_xml::de::from_reader(reader)?;
     _post_histories.row
   };
-  jobs.borrow_mut()[job_index].state = State::Parsing(30);
-  update_display(&jobs.borrow())?;
+  jobs.lock().unwrap()[job_index].state = State::Parsing(30);
+  update_display(&jobs.lock().unwrap())?;
 
   let _post_links = {
-    let mut filepath = get_data_path(&PathBuf::from(&jobs.borrow()[job_index].filepath));
+    let mut filepath = get_data_path(&PathBuf::from(&jobs.lock().unwrap()[job_index].filepath));
     filepath.push("PostLinks.xml");
     let f = File::open(filepath.to_string_lossy().to_string())?;
     let reader = std::io::BufReader::new(f);
     let _post_links: se_struct::PostLinks = quick_xml::de::from_reader(reader)?;
     _post_links.row
   };
-  jobs.borrow_mut()[job_index].state = State::Parsing(40);
-  update_display(&jobs.borrow())?;
+  jobs.lock().unwrap()[job_index].state = State::Parsing(40);
+  update_display(&jobs.lock().unwrap())?;
 
   let _posts = {
-    let mut filepath = get_data_path(&PathBuf::from(&jobs.borrow()[job_index].filepath));
+    let mut filepath = get_data_path(&PathBuf::from(&jobs.lock().unwrap()[job_index].filepath));
     filepath.push("Posts.xml");
     let f = File::open(filepath.to_string_lossy().to_string())?;
     let reader = std::io::BufReader::new(f);
     let posts: se_struct::Posts = quick_xml::de::from_reader(reader)?;
     posts.row
   };
-  jobs.borrow_mut()[job_index].state = State::Parsing(70);
-  update_display(&jobs.borrow())?;
+  jobs.lock().unwrap()[job_index].state = State::Parsing(70);
+  update_display(&jobs.lock().unwrap())?;
 
   let _tags = {
-    let mut filepath = get_data_path(&PathBuf::from(&jobs.borrow()[job_index].filepath));
+    let mut filepath = get_data_path(&PathBuf::from(&jobs.lock().unwrap()[job_index].filepath));
     filepath.push("Tags.xml");
     let f = File::open(filepath.to_string_lossy().to_string())?;
     let reader = std::io::BufReader::new(f);
     let tags: se_struct::Tags = quick_xml::de::from_reader(reader)?;
     tags.row
   };
-  jobs.borrow_mut()[job_index].state = State::Parsing(80);
-  update_display(&jobs.borrow())?;
+  jobs.lock().unwrap()[job_index].state = State::Parsing(80);
+  update_display(&jobs.lock().unwrap())?;
 
   let _users = {
-    let mut filepath = get_data_path(&PathBuf::from(&jobs.borrow()[job_index].filepath));
+    let mut filepath = get_data_path(&PathBuf::from(&jobs.lock().unwrap()[job_index].filepath));
     filepath.push("Users.xml");
     let f = File::open(filepath.to_string_lossy().to_string())?;
     let reader = std::io::BufReader::new(f);
     let users: se_struct::Users = quick_xml::de::from_reader(reader)?;
     users.row
   };
-  jobs.borrow_mut()[job_index].state = State::Parsing(90);
-  update_display(&jobs.borrow())?;
+  jobs.lock().unwrap()[job_index].state = State::Parsing(90);
+  update_display(&jobs.lock().unwrap())?;
 
   let _votes = {
-    let mut filepath = get_data_path(&PathBuf::from(&jobs.borrow()[job_index].filepath));
+    let mut filepath = get_data_path(&PathBuf::from(&jobs.lock().unwrap()[job_index].filepath));
     filepath.push("Votes.xml");
     let f = File::open(filepath.to_string_lossy().to_string())?;
     let reader = std::io::BufReader::new(f);
     let votes: se_struct::Votes = quick_xml::de::from_reader(reader)?;
     votes.row
   };
-  jobs.borrow_mut()[job_index].state = State::Parsing(100);
-  update_display(&jobs.borrow())?;
+  jobs.lock().unwrap()[job_index].state = State::Parsing(100);
+  update_display(&jobs.lock().unwrap())?;
 
   Ok(())
 }
 
 // Will asynchronously call the various functions of the provided job.
 // It is the responsibility of these function to call update_display regularly.
-async fn process(config: &Config, jobs: &Rc<RefCell<Vec<Job>>>, job_index: usize) -> Result<()> {
-  match download(config, jobs, job_index).await {
+async fn process(config: Config, jobs: Arc<Mutex<Vec<Job>>>, job_index: usize) -> Result<()> {
+  match download(&config, &jobs, job_index).await {
     Err(e) => {
-      jobs.borrow_mut()[job_index].state = State::Error(format!("download error: {}", e));
-      update_display(&jobs.borrow())?;
+      jobs.lock().unwrap()[job_index].state = State::Error(format!("download error: {}", e));
+      update_display(&jobs.lock().unwrap())?;
       return Err(e);
     },
     _ => (),
   };
-  match unzip(config, jobs, job_index).await {
+  match unzip(&config, &jobs, job_index).await {
     Err(e) => {
-      jobs.borrow_mut()[job_index].state = State::Error(format!("decompression error: {}", e));
-      update_display(&jobs.borrow())?;
+      jobs.lock().unwrap()[job_index].state = State::Error(format!("decompression error: {}", e));
+      update_display(&jobs.lock().unwrap())?;
       return Err(e);
     },
     _ => (),
   }
-  match parse(config, jobs, job_index).await {
+  match parse(&config, &jobs, job_index).await {
     Err(e) => {
-      jobs.borrow_mut()[job_index].state = State::Error(format!("parsing error: {}", e));
-      update_display(&jobs.borrow())?;
+      jobs.lock().unwrap()[job_index].state = State::Error(format!("parsing error: {}", e));
+      update_display(&jobs.lock().unwrap())?;
       return Err(e);
     },
     _ => (),
   }
 
-  jobs.borrow_mut()[job_index].state = State::Done;
-  update_display(&jobs.borrow())?;
+  jobs.lock().unwrap()[job_index].state = State::Done;
+  update_display(&jobs.lock().unwrap())?;
   Ok(())
 }
 
@@ -377,24 +377,41 @@ async fn main() -> Result<()> {
     std::process::exit(0);
   }).expect("Error setting Ctrl-C handler");
 
-  let jobs = Rc::new(RefCell::new(create_job_list(&config, site_list)));
+  let jobs = Arc::new(Mutex::new(create_job_list(&config, site_list)));
   // let jobs = Rc::new(RefCell::new(vec![
   //   Job { url: "http://speedtest.ftp.otenet.gr/files/test100k.db".to_string(), filename: "test100k.db".to_string(), state: State::Wait },
   //   Job { url: "http://speedtest.ftp.otenet.gr/files/test1Mb.db".to_string(), filename: "test1Mb.db".to_string(), state: State::Wait },
   //   Job { url: "http://speedtest.ftp.otenet.gr/files/test10Mb.db".to_string(), filename: "test10Mb.db".to_string(), state: State::Wait },
   // ]));
-  update_display(&jobs.borrow())?;
+  update_display(&jobs.lock().unwrap())?;
 
-  let nbjobs = jobs.borrow().len();
-  // We convert the jobs to futures that we will wait simultaneously
-  // Concurrent requests (https://gist.github.com/joseluisq/e7f926d73e02fb9dd6114f4d8be6607d)
-  let tasks = futures::stream::iter(
-    (0..nbjobs).map(|index| process(&config, &jobs, index))
-  ).buffer_unordered(3).collect::<Vec<_>>();
-  // Waiting on all the future
-  tasks.await;
+  let nbjobs = jobs.lock().unwrap().len();
 
-  update_display(&jobs.borrow())?;
+  // {
+  //   // We convert the jobs to futures that we will wait simultaneously
+  //   // Concurrent requests (https://gist.github.com/joseluisq/e7f926d73e02fb9dd6114f4d8be6607d)
+  //   let tasks = futures::stream::iter(
+  //     (0..nbjobs).map(|index| process(config.clone(), jobs.clone(), index))
+  //   ).buffer_unordered(3).collect::<Vec<_>>();
+  //   // Waiting on all the future
+  //   tasks.await;
+  // }
+
+  {
+    // Here we spawn the jobs for parallel processing
+    let mut tokio_jobs = vec![];
+    for index in 0..nbjobs {
+      tokio_jobs.push(tokio::spawn(process(config.clone(), jobs.clone(), index)));
+    }
+    let tasks = futures::stream::iter(tokio_jobs).buffer_unordered(3).collect::<Vec<_>>();
+    tasks.await;
+  }
+
+  update_display(&jobs.lock().unwrap())?;
+  // Reposition cursor on the last line
+  let position = crossterm::cursor::position()?;
+  crossterm::execute!(stdout(), crossterm::cursor::MoveTo(position.0, position.1 - 1 + nbjobs as u16))?;
+
   crossterm::execute!(stdout(), crossterm::cursor::Show)?;
   println!("");
   Ok(())
