@@ -366,13 +366,11 @@ pub struct Vote {
  #[serde(rename = "@CreationDate")]
  creation_date: NaiveDateTime,
  // only for VoteTypeId 5
- #[serde(deserialize_with = "from_rfc3339_without_timezone", default)]
  #[serde(rename = "@UserId")]
- user_id: Option<NaiveDateTime>,
+ user_id: Option<String>,
  // only for VoteTypeId 9
- #[serde(deserialize_with = "from_rfc3339_without_timezone", default)]
  #[serde(rename = "@BountyAmount")]
- bounty_amount: Option<NaiveDateTime>,
+ bounty_amount: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]

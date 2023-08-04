@@ -1,4 +1,5 @@
 #![allow(dead_code)]
+#![feature(core_intrinsics)] // for breakpoint
 
 use bytes::Buf;
 use clap::Parser;
@@ -26,6 +27,9 @@ struct Config {
   /// List of files/urls to download
   #[arg(short, long, default_value=PathBuf::from("site.list").into_os_string(), value_name = "FILE")]
   site_list: PathBuf,
+  /// Maximum number of parallel threads to use (including max parallel download)
+  #[arg(short, long, default_value_t=3)]
+  max_threads: u8,
 }
 
 error_chain! {
@@ -73,14 +77,14 @@ impl Iterator for PartialRangeIter {
   }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Ord, PartialOrd, Eq, PartialEq)]
 enum State {
+  Error(String),
   Wait,
   Downloading(u8),
   Unzipping(u8),
   Parsing(u8),
   Done,
-  Error(String),
 }
 
 #[derive(Debug, Clone)]
@@ -94,43 +98,75 @@ fn update_display(jobs: &Vec<Job>) -> Result<()> {
   if jobs.len() == 0 {
     return Ok(())
   }
+
   // This function has no state so we have to recompute a bunch of things every time.
   let max_filename_length = jobs.iter().map(|job| job.filepath.len()).fold(std::i32::MIN, |a,b| a.max(b as i32));
   let terminal_size = crossterm::terminal::size()?;
-  let progress_bar_width: usize = std::cmp::min(terminal_size.0 as usize - max_filename_length as usize - 40 as usize, 50);
-  for job in jobs.iter() {
-    crossterm::execute!(stdout(), crossterm::terminal::Clear(crossterm::terminal::ClearType::CurrentLine))?;
-    let filename = PathBuf::from(job.filepath.clone()).file_name().unwrap().to_str().unwrap().to_string();
-    print!("{:width$} ", filename, width = max_filename_length as usize);
-    match job.state.clone() {
-      State::Wait => println!("{:width$}waiting", "", width = progress_bar_width),
-      State::Downloading(progress) => {
-        let nbhash = ((progress_bar_width) as f32 * progress as f32 / 100.0) as u8;
-        // ⎯
-        let progress_bar = (0..nbhash).map(|_| "━").collect::<String>();
-        println!("[{:width$}] downloading {}%", progress_bar, progress, width = progress_bar_width);
-      },
-      State::Unzipping(progress) => {
-        let nbhash = ((progress_bar_width) as f32 * progress as f32 / 100.0) as u8;
-        let progress_bar = (0..nbhash).map(|_| "■").collect::<String>();
-        println!("[{:━<width$}] unzipping {}%", progress_bar, progress, width = progress_bar_width);
-      },
-      State::Parsing(progress) => {
-        let nbhash = ((progress_bar_width) as f32 * progress as f32 / 100.0) as u8;
-        let progress_bar = (0..nbhash).map(|_| "█").collect::<String>();
-        println!("[{:■<width$}] parsing {}%", progress_bar, progress, width = progress_bar_width);
-      },
-      State::Done => {
-        let full_progress_bar = (0..progress_bar_width).map(|_| "█").collect::<String>();
-        println!("[{:width$}] done.", full_progress_bar, width = progress_bar_width);
-      },
-      State::Error(label) => {
-        println!(" {:width$}  {}.", " ", label, width = progress_bar_width);
-      },
+  let expected_progress_bar_width =
+    (terminal_size.0 as usize).saturating_sub(max_filename_length as usize).saturating_sub(30 as usize);
+  let progress_bar_width: usize = std::cmp::min(expected_progress_bar_width, 50);
+  let mut current_jobs = jobs.iter()
+    .filter(|j| j.state != State::Wait && j.state != State::Done) // Do not display waiting and done jobs
+    .take(terminal_size.1 as usize - 1) // Do not display more than the size of the terminal
+    .collect::<Vec<_>>();
+  current_jobs.sort_by(|a, b| {
+    match (a.state.clone(), b.state.clone()) {
+      (State::Downloading(avalue), State::Downloading(bvalue)) => bvalue.cmp(&avalue),
+      (State::Unzipping(avalue), State::Unzipping(bvalue)) => bvalue.cmp(&avalue),
+      (State::Parsing(avalue), State::Parsing(bvalue)) => bvalue.cmp(&avalue),
+      _ => b.state.cmp(&a.state),
+    }
+  });
+  let done_jobs = jobs.iter().filter(|j| j.state != State::Done).collect::<Vec<_>>();
+
+  println!("Files to be processed: {} done / {} total", jobs.len() - done_jobs.len(), jobs.len());
+  if progress_bar_width > 3 {
+    for (index, job) in current_jobs.iter().enumerate() {
+      crossterm::execute!(stdout(), crossterm::terminal::Clear(crossterm::terminal::ClearType::CurrentLine))?;
+      let filename = PathBuf::from(job.filepath.clone()).file_name().unwrap().to_str().unwrap().to_string();
+      print!("{:width$} ", filename, width = max_filename_length as usize);
+      match job.state.clone() {
+        State::Wait => print!("{:width$}waiting", "", width = progress_bar_width),
+        State::Downloading(progress) => {
+          let nbhash = ((progress_bar_width) as f32 * progress as f32 / 100.0) as u8;
+          // ⎯
+          let progress_bar = (0..nbhash).map(|_| "━").collect::<String>();
+          print!("[{:width$}] downloading {}%", progress_bar, progress, width = progress_bar_width);
+        },
+        State::Unzipping(progress) => {
+          let nbhash = ((progress_bar_width) as f32 * progress as f32 / 100.0) as u8;
+          let progress_bar = (0..nbhash).map(|_| "■").collect::<String>();
+          print!("[{:━<width$}] unzipping {}%", progress_bar, progress, width = progress_bar_width);
+        },
+        State::Parsing(progress) => {
+          let nbhash = ((progress_bar_width) as f32 * progress as f32 / 100.0) as u8;
+          let progress_bar = (0..nbhash).map(|_| "█").collect::<String>();
+          print!("[{:■<width$}] parsing {}%", progress_bar, progress, width = progress_bar_width);
+        },
+        State::Done => {
+          let full_progress_bar = (0..progress_bar_width).map(|_| "█").collect::<String>();
+          print!("[{:width$}] done.", full_progress_bar, width = progress_bar_width);
+        },
+        State::Error(label) => {
+          print!(" {:width$}  {}.", " ", label, width = progress_bar_width);
+        },
+      }
+      if index <= current_jobs.len() - 1 {
+        println!("");
+      }
     }
   }
   let position = crossterm::cursor::position()?;
-  crossterm::execute!(stdout(), crossterm::cursor::MoveTo(position.0, position.1 - jobs.len() as u16))?;
+  let nb_empty_line = (terminal_size.1).saturating_sub(position.1);
+  for index in 0..nb_empty_line {
+    crossterm::execute!(stdout(), crossterm::terminal::Clear(crossterm::terminal::ClearType::CurrentLine))?;
+    if index < nb_empty_line - 1 {
+      println!("");
+    }
+  }
+  let position = crossterm::cursor::position()?;
+  let initial_y_position = (position.1 + 1).saturating_sub(nb_empty_line).saturating_sub(current_jobs.len() as u16);
+  crossterm::execute!(stdout(), crossterm::cursor::MoveTo(0, initial_y_position.saturating_sub(1)))?;
   Ok(())
 }
 
@@ -399,21 +435,18 @@ async fn main() -> Result<()> {
 
   {
     // Here we spawn the jobs for parallel processing
-    let mut tokio_jobs = vec![];
+    let mut tokio_jobs = futures::stream::FuturesUnordered::new();
     for index in 0..nbjobs {
       tokio_jobs.push(tokio::spawn(process(config.clone(), jobs.clone(), index)));
+      if tokio_jobs.len() == config.max_threads as usize {
+        tokio_jobs.next().await;
+      }
     }
-    let tasks = futures::stream::iter(tokio_jobs).buffer_unordered(3).collect::<Vec<_>>();
-    tasks.await;
+    while let Some(_) = tokio_jobs.next().await {}
   }
 
   update_display(&jobs.lock().unwrap())?;
-  // Reposition cursor on the last line
-  let position = crossterm::cursor::position()?;
-  crossterm::execute!(stdout(), crossterm::cursor::MoveTo(position.0, position.1 - 1 + nbjobs as u16))?;
-
   crossterm::execute!(stdout(), crossterm::cursor::Show)?;
-  println!("");
   Ok(())
 }
 
