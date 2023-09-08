@@ -257,9 +257,17 @@ async fn unzip(_config: &Config, jobs: &Arc<Mutex<Vec<Job>>>, job_index: usize) 
   let dest = PathBuf::from(get_data_path(&PathBuf::from(filepath)));
   sz.for_each_entries(|entry, reader| {
     let mut buf = vec![0; (total_size as f32 / 100.0) as usize];
-    let path = dest.join(entry.name());
-    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-    let mut file = File::create(path).unwrap();
+    let unzipped_filename = dest.join(entry.name());
+    std::fs::create_dir_all(unzipped_filename.parent().unwrap()).unwrap();
+    // Check if the file exists
+    if let Ok(metadata) = std::fs::metadata(&unzipped_filename) {
+      // ...and if it does, get its size and compare with the size of the file in the zipped file
+      if metadata.len() == entry.size {
+        // We assume the file we have is already unzipped.
+        return Ok(true);
+      }
+    }
+    let mut file = File::create(unzipped_filename).unwrap();
     loop {
       let read_size = reader.read(&mut buf)?;
       if read_size == 0 {
@@ -280,36 +288,26 @@ macro_rules! do_load_se_file {
     let mut filepath = get_data_path(&PathBuf::from(&$jobs.lock().unwrap()[$job_index].filepath));
     filepath.push($filename);
     let sfilepath = filepath.to_string_lossy().to_string();
+    $jobs.lock().unwrap()[$job_index].state = State::Parsing(($completion, sfilepath.clone()));
+    update_display(&$jobs.lock().unwrap())?;
     let $content = if filepath.exists() {
       let f = File::open(&sfilepath)?;
       let reader = std::io::BufReader::new(f);
       let foo: $t = quick_xml::de::from_reader(reader)?;
       Some(foo.row)
     } else { None };
-    $jobs.lock().unwrap()[$job_index].state = State::Parsing(($completion, sfilepath));
   };
 }
 
 async fn parse(_config: &Config, jobs: &Arc<Mutex<Vec<Job>>>, job_index: usize) -> Result<()> {
-  jobs.lock().unwrap()[job_index].state = State::Parsing((0, String::from("")));
-  update_display(&jobs.lock().unwrap())?;
-
-  do_load_se_file!(_badges, "Badges.xml", se_struct::Badges, 10, jobs, job_index);
-  update_display(&jobs.lock().unwrap())?;
-  do_load_se_file!(_comments, "Comments.xml", se_struct::Comments, 20, jobs, job_index);
-  update_display(&jobs.lock().unwrap())?;
-  do_load_se_file!(_post_histories, "PostHistory.xml", se_struct::PostHistories, 50, jobs, job_index);
-  update_display(&jobs.lock().unwrap())?;
-  do_load_se_file!(_post_links, "PostLinks.xml", se_struct::PostLinks, 60, jobs, job_index);
-  update_display(&jobs.lock().unwrap())?;
-  do_load_se_file!(_posts, "Posts.xml", se_struct::Posts, 70, jobs, job_index);
-  update_display(&jobs.lock().unwrap())?;
-  do_load_se_file!(_tags, "Tags.xml", se_struct::Tags, 80, jobs, job_index);
-  update_display(&jobs.lock().unwrap())?;
-  do_load_se_file!(_users, "Users.xml", se_struct::Users, 90, jobs, job_index);
-  update_display(&jobs.lock().unwrap())?;
-  do_load_se_file!(_votes, "Votes.xml", se_struct::Votes, 100, jobs, job_index);
-  update_display(&jobs.lock().unwrap())?;
+  do_load_se_file!(_badges, "Badges.xml", se_struct::Badges, 0, jobs, job_index);
+  do_load_se_file!(_comments, "Comments.xml", se_struct::Comments, 10, jobs, job_index);
+  do_load_se_file!(_post_histories, "PostHistory.xml", se_struct::PostHistories, 40, jobs, job_index);
+  do_load_se_file!(_post_links, "PostLinks.xml", se_struct::PostLinks, 50, jobs, job_index);
+  do_load_se_file!(_posts, "Posts.xml", se_struct::Posts, 60, jobs, job_index);
+  do_load_se_file!(_tags, "Tags.xml", se_struct::Tags, 70, jobs, job_index);
+  do_load_se_file!(_users, "Users.xml", se_struct::Users, 80, jobs, job_index);
+  do_load_se_file!(_votes, "Votes.xml", se_struct::Votes, 90, jobs, job_index);
 
   Ok(())
 }
