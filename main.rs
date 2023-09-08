@@ -14,6 +14,7 @@ use std::fs::File;
 use std::io::{stdout, Write};
 use std::str::FromStr;
 use std::sync::{Arc, Mutex};
+use std::time::Instant;
 use std::path::{Path, PathBuf};
 use tokio;
 
@@ -41,6 +42,7 @@ error_chain! {
     Parser(quick_xml::Error);
     Deserializer(quick_xml::DeError);
     Decompress(sevenz_rust::Error);
+    TryFromIntError(core::num::TryFromIntError);
     Infallible(Infallible);
   }
 }
@@ -182,38 +184,59 @@ fn get_data_path(filepath: &Path) -> PathBuf {
 }
 
 async fn download(_config: &Config, jobs: &Arc<Mutex<Vec<Job>>>, job_index: usize) -> Result<()> {
-  const CHUNK_SIZE: u32 = 1024 * 1024;
+  let mut chunk_size: u32 = 1024 * 1024;
 
   let url = &jobs.lock().unwrap()[job_index].url.clone();
   let filename = &jobs.lock().unwrap()[job_index].filepath.clone();
 
   let client = reqwest::Client::new();
+  // Remotely get the size of the file to download
   let response = client.head(url).send().await?;
-  let length = response
+  let content_length = response
     .headers()
     .get(CONTENT_LENGTH)
     .ok_or("response doesn't include the content length")?;
-  let length = u64::from_str(length.to_str()?).map_err(|_| "invalid Content-Length header")?;
+  let content_length = u64::from_str(content_length.to_str()?).map_err(|_| "invalid Content-Length header")?;
+  // Check if the file exists...
+  if let Ok(metadata) = std::fs::metadata(filename) {
+    // ...and if it does, get its size and compare with the size of the file on the server
+    if metadata.len() == content_length {
+      // We assume the file we have is already downloaded and correct.
+      return Ok(());
+    }
+  }
   let mut output_file = std::io::BufWriter::new(File::create(filename)?);
 
   jobs.lock().unwrap()[job_index].state = State::Downloading(0);
   update_display(&jobs.lock().unwrap())?;
-  for range in PartialRangeIter::new(0, length - 1, CHUNK_SIZE)? {
-  // for range in PartialRangeIter::new(0, length - 1, (length / 100) as u32)? {
+  let mut downloaded: usize = 0;
+  for range in PartialRangeIter::new(0, content_length - 1, chunk_size)? {
+    let then = Instant::now();
     let range_header = HeaderValue::from_str(&format!("bytes={}-{}", range.start, range.end))
       .expect("string provided by format!");
     let response = client.get(url).header(RANGE, range_header).send().await?;
+    let time_to_download_chunk = (Instant::now() - then).as_secs();
+    if time_to_download_chunk > 1 { // we are aiming at updating the display once per second
+      chunk_size = (chunk_size as f32 * 0.9) as u32;
+    } else {
+      chunk_size = (chunk_size as f32 * 1.1) as u32;
+    }
 
     let status = response.status();
     if !(status == StatusCode::OK || status == StatusCode::PARTIAL_CONTENT) {
-      println!("status {}", status);
       error_chain::bail!("Unexpected server response: {}", status)
     }
 
     let content = bytes::Bytes::from(response.bytes().await?);
+    // Some server do not honor the range request (like python's SimpleHTTPServer) so we need to
+    // keep track of what is downloaded and stop when we are done.
+    downloaded += content.len();
     std::io::copy(&mut content.reader(), &mut output_file)?;
-    jobs.lock().unwrap()[job_index].state = State::Downloading((range.start as f32 / length as f32 * 100.0) as u8);
+    jobs.lock().unwrap()[job_index].state = State::Downloading((downloaded as f32 / content_length as f32 * 100.0) as u8);
     update_display(&jobs.lock().unwrap())?;
+    if downloaded >= content_length.try_into()? {
+      break;
+    }
   }
 
   Ok(())
@@ -221,8 +244,6 @@ async fn download(_config: &Config, jobs: &Arc<Mutex<Vec<Job>>>, job_index: usiz
 
 async fn unzip(_config: &Config, jobs: &Arc<Mutex<Vec<Job>>>, job_index: usize) -> Result<()> {
   let filepath = &jobs.lock().unwrap()[job_index].filepath.clone();
-  // sevenz_rust::decompress_file(filepath, get_data_path(&PathBuf::from(filepath))).map_err(|e| e.to_string())?;
-
   // https://github.com/dyz1990/sevenz-rust/blob/main/examples/decompress_progress.rs
   let mut sz = sevenz_rust::SevenZReader::open(filepath, "".into())?;
   let total_size: u64 = sz

@@ -3,9 +3,11 @@
 # test10Mb.db http://speedtest.ftp.otenet.gr/files/test10Mb.db
 # test100k.db http://speedtest.ftp.otenet.gr/files/test100k.db
 # askubuntu.com.7z http://localhost:8080/askubuntu.com.7z
+stackoverflow.com-Badges.7z http://localhost:8080/stackoverflow.com-Badges.7z
 3dprinting.meta.stackexchange.com.7z http://localhost:8080/3dprinting.meta.stackexchange.com.7z
 bioinformatics.stackexchange.com.7z http://localhost:8080/bioinformatics.stackexchange.com.7z
 cardano.stackexchange.com.7z http://localhost:8080/cardano.stackexchange.com.7z
 patents.meta.stackexchange.com.7z http://localhost:8080/patents.meta.stackexchange.com.7z
 tor.stackexchange.com.7z http://localhost:8080/tor.stackexchange.com.7z
-# stackoverflow.com-Badges.7z http://localhost:8080/stackoverflow.com-Badges.7z
+academia.stackexchange.com.7z http://localhost:8080/academia.stackexchange.com.7z
+# stackoverflow.com-Comments.7z http://localhost:8080/stackoverflow.com-Comments.7z
