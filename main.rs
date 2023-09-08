@@ -1,5 +1,6 @@
 #![allow(dead_code)]
 #![feature(core_intrinsics)] // for breakpoint
+#![feature(let_chains)] // for macro
 
 use bytes::Buf;
 use clap::Parser;
@@ -83,7 +84,7 @@ enum State {
   Wait,
   Downloading(u8),
   Unzipping(u8),
-  Parsing(u8),
+  Parsing((u8, String)),
   Done,
 }
 
@@ -113,7 +114,7 @@ fn update_display(jobs: &Vec<Job>) -> Result<()> {
     match (a.state.clone(), b.state.clone()) {
       (State::Downloading(avalue), State::Downloading(bvalue)) => bvalue.cmp(&avalue),
       (State::Unzipping(avalue), State::Unzipping(bvalue)) => bvalue.cmp(&avalue),
-      (State::Parsing(avalue), State::Parsing(bvalue)) => bvalue.cmp(&avalue),
+      (State::Parsing((avalue, _)), State::Parsing((bvalue, _))) => bvalue.cmp(&avalue),
       _ => b.state.cmp(&a.state),
     }
   });
@@ -138,17 +139,20 @@ fn update_display(jobs: &Vec<Job>) -> Result<()> {
           let progress_bar = (0..nbhash).map(|_| "■").collect::<String>();
           print!("[{:━<width$}] unzipping {}%", progress_bar, progress, width = progress_bar_width);
         },
-        State::Parsing(progress) => {
+        State::Parsing((progress, filename)) => {
           let nbhash = ((progress_bar_width) as f32 * progress as f32 / 100.0) as u8;
           let progress_bar = (0..nbhash).map(|_| "█").collect::<String>();
-          print!("[{:■<width$}] parsing {}%", progress_bar, progress, width = progress_bar_width);
+          print!("[{:■<width$}] parsing {}% ({})", progress_bar, progress, filename, width = progress_bar_width);
         },
         State::Done => {
           let full_progress_bar = (0..progress_bar_width).map(|_| "█").collect::<String>();
           print!("[{:width$}] done.", full_progress_bar, width = progress_bar_width);
         },
         State::Error(label) => {
-          print!(" {:width$}  {}.", " ", label, width = progress_bar_width);
+          print!(" {:width$}  ", " ", width = progress_bar_width);
+          let position = crossterm::cursor::position()?;
+          let max: usize = (terminal_size.0).saturating_sub(position.0).saturating_sub(1) as usize;
+          print!("{}", &label[..max]);
         },
       }
       if index <= current_jobs.len() - 1 {
@@ -250,96 +254,40 @@ async fn unzip(_config: &Config, jobs: &Arc<Mutex<Vec<Job>>>, job_index: usize) 
   Ok(())
 }
 
+macro_rules! do_load_se_file {
+  ($content:ident, $filename:expr, $t:path, $completion:expr, $jobs:expr, $job_index:expr) => {
+    let mut filepath = get_data_path(&PathBuf::from(&$jobs.lock().unwrap()[$job_index].filepath));
+    filepath.push($filename);
+    let sfilepath = filepath.to_string_lossy().to_string();
+    let $content = if filepath.exists() {
+      let f = File::open(&sfilepath)?;
+      let reader = std::io::BufReader::new(f);
+      let foo: $t = quick_xml::de::from_reader(reader)?;
+      Some(foo.row)
+    } else { None };
+    $jobs.lock().unwrap()[$job_index].state = State::Parsing(($completion, sfilepath));
+  };
+}
+
 async fn parse(_config: &Config, jobs: &Arc<Mutex<Vec<Job>>>, job_index: usize) -> Result<()> {
-  jobs.lock().unwrap()[job_index].state = State::Parsing(0);
+  jobs.lock().unwrap()[job_index].state = State::Parsing((0, String::from("")));
   update_display(&jobs.lock().unwrap())?;
 
-  let _badges = {
-    let mut filepath = get_data_path(&PathBuf::from(&jobs.lock().unwrap()[job_index].filepath));
-    filepath.push("Badges.xml");
-    let f = File::open(filepath.to_string_lossy().to_string())?;
-    let reader = std::io::BufReader::new(f);
-    let badges: se_struct::Badges = quick_xml::de::from_reader(reader)?;
-    badges.row
-  };
-  jobs.lock().unwrap()[job_index].state = State::Parsing(10);
+  do_load_se_file!(_badges, "Badges.xml", se_struct::Badges, 10, jobs, job_index);
   update_display(&jobs.lock().unwrap())?;
-
-  let _comments = {
-    let mut filepath = get_data_path(&PathBuf::from(&jobs.lock().unwrap()[job_index].filepath));
-    filepath.push("Comments.xml");
-    let f = File::open(filepath.to_string_lossy().to_string())?;
-    let reader = std::io::BufReader::new(f);
-    let comments: se_struct::Comments = quick_xml::de::from_reader(reader)?;
-    comments.row
-  };
-  jobs.lock().unwrap()[job_index].state = State::Parsing(20);
+  do_load_se_file!(_comments, "Comments.xml", se_struct::Comments, 20, jobs, job_index);
   update_display(&jobs.lock().unwrap())?;
-
-  let _post_histories = {
-    let mut filepath = get_data_path(&PathBuf::from(&jobs.lock().unwrap()[job_index].filepath));
-    filepath.push("PostHistory.xml");
-    let f = File::open(filepath.to_string_lossy().to_string())?;
-    let reader = std::io::BufReader::new(f);
-    let _post_histories: se_struct::PostHistories = quick_xml::de::from_reader(reader)?;
-    _post_histories.row
-  };
-  jobs.lock().unwrap()[job_index].state = State::Parsing(30);
+  do_load_se_file!(_post_histories, "PostHistory.xml", se_struct::PostHistories, 50, jobs, job_index);
   update_display(&jobs.lock().unwrap())?;
-
-  let _post_links = {
-    let mut filepath = get_data_path(&PathBuf::from(&jobs.lock().unwrap()[job_index].filepath));
-    filepath.push("PostLinks.xml");
-    let f = File::open(filepath.to_string_lossy().to_string())?;
-    let reader = std::io::BufReader::new(f);
-    let _post_links: se_struct::PostLinks = quick_xml::de::from_reader(reader)?;
-    _post_links.row
-  };
-  jobs.lock().unwrap()[job_index].state = State::Parsing(40);
+  do_load_se_file!(_post_links, "PostLinks.xml", se_struct::PostLinks, 60, jobs, job_index);
   update_display(&jobs.lock().unwrap())?;
-
-  let _posts = {
-    let mut filepath = get_data_path(&PathBuf::from(&jobs.lock().unwrap()[job_index].filepath));
-    filepath.push("Posts.xml");
-    let f = File::open(filepath.to_string_lossy().to_string())?;
-    let reader = std::io::BufReader::new(f);
-    let posts: se_struct::Posts = quick_xml::de::from_reader(reader)?;
-    posts.row
-  };
-  jobs.lock().unwrap()[job_index].state = State::Parsing(70);
+  do_load_se_file!(_posts, "Posts.xml", se_struct::Posts, 70, jobs, job_index);
   update_display(&jobs.lock().unwrap())?;
-
-  let _tags = {
-    let mut filepath = get_data_path(&PathBuf::from(&jobs.lock().unwrap()[job_index].filepath));
-    filepath.push("Tags.xml");
-    let f = File::open(filepath.to_string_lossy().to_string())?;
-    let reader = std::io::BufReader::new(f);
-    let tags: se_struct::Tags = quick_xml::de::from_reader(reader)?;
-    tags.row
-  };
-  jobs.lock().unwrap()[job_index].state = State::Parsing(80);
+  do_load_se_file!(_tags, "Tags.xml", se_struct::Tags, 80, jobs, job_index);
   update_display(&jobs.lock().unwrap())?;
-
-  let _users = {
-    let mut filepath = get_data_path(&PathBuf::from(&jobs.lock().unwrap()[job_index].filepath));
-    filepath.push("Users.xml");
-    let f = File::open(filepath.to_string_lossy().to_string())?;
-    let reader = std::io::BufReader::new(f);
-    let users: se_struct::Users = quick_xml::de::from_reader(reader)?;
-    users.row
-  };
-  jobs.lock().unwrap()[job_index].state = State::Parsing(90);
+  do_load_se_file!(_users, "Users.xml", se_struct::Users, 90, jobs, job_index);
   update_display(&jobs.lock().unwrap())?;
-
-  let _votes = {
-    let mut filepath = get_data_path(&PathBuf::from(&jobs.lock().unwrap()[job_index].filepath));
-    filepath.push("Votes.xml");
-    let f = File::open(filepath.to_string_lossy().to_string())?;
-    let reader = std::io::BufReader::new(f);
-    let votes: se_struct::Votes = quick_xml::de::from_reader(reader)?;
-    votes.row
-  };
-  jobs.lock().unwrap()[job_index].state = State::Parsing(100);
+  do_load_se_file!(_votes, "Votes.xml", se_struct::Votes, 100, jobs, job_index);
   update_display(&jobs.lock().unwrap())?;
 
   Ok(())
@@ -446,6 +394,8 @@ async fn main() -> Result<()> {
   }
 
   update_display(&jobs.lock().unwrap())?;
+  let number_of_unfinished_jobs: u16 = jobs.lock().unwrap().iter().filter(|job| job.state != State::Done).count() as u16;
+  crossterm::execute!(stdout(), crossterm::cursor::MoveDown(number_of_unfinished_jobs + 1))?;
   crossterm::execute!(stdout(), crossterm::cursor::Show)?;
   Ok(())
 }
