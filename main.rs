@@ -44,6 +44,7 @@ error_chain! {
     Decompress(sevenz_rust::Error);
     TryFromIntError(core::num::TryFromIntError);
     Infallible(Infallible);
+    SystemTimeError(std::time::SystemTimeError);
   }
 }
 
@@ -84,7 +85,7 @@ impl Iterator for PartialRangeIter {
 enum State {
   Error(String),
   Wait,
-  Downloading(u8),
+  Downloading((usize, usize)),
   Unzipping(u8),
   Parsing((u8, String)),
   Done,
@@ -114,7 +115,11 @@ fn update_display(jobs: &Vec<Job>) -> Result<()> {
     .collect::<Vec<_>>();
   current_jobs.sort_by(|a, b| {
     match (a.state.clone(), b.state.clone()) {
-      (State::Downloading(avalue), State::Downloading(bvalue)) => bvalue.cmp(&avalue),
+      (State::Downloading((adownloaded, atotal)), State::Downloading((bdownloaded, btotal))) => {
+        let avalue = (adownloaded as f32 / atotal as f32 * 100.0) as u8;
+        let bvalue = (bdownloaded as f32 / btotal as f32 * 100.0) as u8;
+        bvalue.cmp(&avalue)
+      },
       (State::Unzipping(avalue), State::Unzipping(bvalue)) => bvalue.cmp(&avalue),
       (State::Parsing((avalue, _)), State::Parsing((bvalue, _))) => bvalue.cmp(&avalue),
       _ => b.state.cmp(&a.state),
@@ -130,11 +135,13 @@ fn update_display(jobs: &Vec<Job>) -> Result<()> {
       print!("{:width$} ", filename, width = max_filename_length as usize);
       match job.state.clone() {
         State::Wait => print!("{:width$}waiting", "", width = progress_bar_width),
-        State::Downloading(progress) => {
+        State::Downloading((downloaded, total)) => {
+          let progress = (downloaded as f32 / total as f32 * 100.0) as u8;
           let nbhash = ((progress_bar_width) as f32 * progress as f32 / 100.0) as u8;
           // ⎯
           let progress_bar = (0..nbhash).map(|_| "━").collect::<String>();
-          print!("[{:width$}] downloading {}%", progress_bar, progress, width = progress_bar_width);
+          print!("[{:width$}] downloading {}% ({}/{})", progress_bar, progress, downloaded, total,
+            width = progress_bar_width);
         },
         State::Unzipping(progress) => {
           let nbhash = ((progress_bar_width) as f32 * progress as f32 / 100.0) as u8;
@@ -184,7 +191,7 @@ fn get_data_path(filepath: &Path) -> PathBuf {
 }
 
 async fn download(_config: &Config, jobs: &Arc<Mutex<Vec<Job>>>, job_index: usize) -> Result<()> {
-  let mut chunk_size: u32 = 1024 * 1024;
+  let mut chunk_size: usize = 1024 * 1024;
 
   let url = &jobs.lock().unwrap()[job_index].url.clone();
   let filename = &jobs.lock().unwrap()[job_index].filepath.clone();
@@ -207,20 +214,15 @@ async fn download(_config: &Config, jobs: &Arc<Mutex<Vec<Job>>>, job_index: usiz
   }
   let mut output_file = std::io::BufWriter::new(File::create(filename)?);
 
-  jobs.lock().unwrap()[job_index].state = State::Downloading(0);
+  jobs.lock().unwrap()[job_index].state = State::Downloading((0, 0));
   update_display(&jobs.lock().unwrap())?;
   let mut downloaded: usize = 0;
-  for range in PartialRangeIter::new(0, content_length - 1, chunk_size)? {
-    let then = Instant::now();
-    let range_header = HeaderValue::from_str(&format!("bytes={}-{}", range.start, range.end))
+  while downloaded <= content_length.try_into().unwrap() {
+    let now = Instant::now();
+    let range_end = std::cmp::max(downloaded.saturating_add(chunk_size), content_length.try_into().unwrap());
+    let range_header = HeaderValue::from_str(&format!("bytes={}-{}", downloaded, range_end))
       .expect("string provided by format!");
     let response = client.get(url).header(RANGE, range_header).send().await?;
-    let time_to_download_chunk = (Instant::now() - then).as_secs();
-    if time_to_download_chunk > 1 { // we are aiming at updating the display once per second
-      chunk_size = (chunk_size as f32 * 0.9) as u32;
-    } else {
-      chunk_size = (chunk_size as f32 * 1.1) as u32;
-    }
 
     let status = response.status();
     if !(status == StatusCode::OK || status == StatusCode::PARTIAL_CONTENT) {
@@ -232,10 +234,13 @@ async fn download(_config: &Config, jobs: &Arc<Mutex<Vec<Job>>>, job_index: usiz
     // keep track of what is downloaded and stop when we are done.
     downloaded += content.len();
     std::io::copy(&mut content.reader(), &mut output_file)?;
-    jobs.lock().unwrap()[job_index].state = State::Downloading((downloaded as f32 / content_length as f32 * 100.0) as u8);
+    jobs.lock().unwrap()[job_index].state = State::Downloading((downloaded, content_length.try_into().unwrap()));
     update_display(&jobs.lock().unwrap())?;
-    if downloaded >= content_length.try_into()? {
-      break;
+    // Adapt the chunk size to get a display update every seconds ideally
+    if now.elapsed().as_millis() > 1000 {
+      chunk_size = (chunk_size as f32 * 0.7) as usize;
+    } else {
+      chunk_size = (chunk_size as f32 * 1.05) as usize;
     }
   }
 
@@ -366,7 +371,7 @@ async fn main() -> Result<()> {
     std::fs::create_dir_all(config.data_path.clone())?;
   }
   if !config.site_list.exists() {
-    Err(format!("site list file {:?} does not exists", config.site_list))?;
+    return Err(format!("site list file {:?} does not exists", config.site_list))?;
   }
   let site_list = std::fs::read_to_string(config.site_list.clone())?.parse()?;
 

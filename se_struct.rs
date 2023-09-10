@@ -1,3 +1,5 @@
+#![allow(unused)]
+
 use serde_with::chrono::naive::NaiveDateTime;
 use serde::Deserialize;
 use serde_repr::Deserialize_repr;
@@ -136,7 +138,7 @@ pub struct PostHistory {
   #[serde(rename = "@Id")]
   id: String,
   #[serde(rename = "@PostHistoryTypeId")]
-  // This field changes probably very often, might not be wise to use an fixed enum here
+  // This field changes probably very often, might not be wise to use a fixed enum here
   post_history_type_id: i16, // PostHistoryType
   #[serde(rename = "@PostId")]
   post_id: String,
