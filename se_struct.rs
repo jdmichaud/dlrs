@@ -1,7 +1,7 @@
 #![allow(unused)]
 
 use serde_with::chrono::naive::NaiveDateTime;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_repr::Deserialize_repr;
 
 mod naive_date_parser {
@@ -38,7 +38,7 @@ mod naive_date_parser {
 
 use naive_date_parser::from_rfc3339_without_timezone;
 
-#[derive(Debug, Deserialize_repr)]
+#[derive(Debug, Deserialize_repr, Serialize)]
 #[repr(u8)]
 pub enum BadgeClass {
   Gold = 1,
@@ -46,7 +46,7 @@ pub enum BadgeClass {
   Bronze = 3,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize)]
 pub struct Badge {
   #[serde(rename = "@Id")]
   id: String,
@@ -65,12 +65,12 @@ pub struct Badge {
 
 // We need this because the all stack exchange XML file uses the tag "row" for
 // some reason.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize)]
 pub struct Badges {
   pub row: Vec<Badge>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize)]
 #[serde(rename_all = "PascalCase")]
 pub struct Comment {
   #[serde(rename = "@Id")]
@@ -91,12 +91,12 @@ pub struct Comment {
   user_id: Option<String>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize)]
 pub struct Comments {
   pub row: Vec<Comment>,
 }
 
-#[derive(Debug, Deserialize_repr)]
+#[derive(Debug, Deserialize_repr, Serialize)]
 #[repr(u8)]
 pub enum PostHistoryType {
   InitialTitle = 1, // The first title a question is asked with.
@@ -132,8 +132,7 @@ pub enum PostHistoryType {
   PostMergeDestination = 38,
 }
 
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "PascalCase")]
+#[derive(Debug, Deserialize, Serialize)]
 pub struct PostHistory {
   #[serde(rename = "@Id")]
   id: String,
@@ -163,19 +162,19 @@ pub struct PostHistory {
   text: Option<String>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize)]
 pub struct PostHistories {
   pub row: Vec<PostHistory>,
 }
 
-#[derive(Debug, Deserialize_repr)]
+#[derive(Debug, Deserialize_repr, Serialize)]
 #[repr(u8)]
 pub enum LinkType {
   Linked = 1,
   Duplicate = 3,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize)]
 pub struct PostLink {
  #[serde(rename = "@Id")]
  id: String,
@@ -190,12 +189,12 @@ pub struct PostLink {
  link_type_id: LinkType,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize)]
 pub struct PostLinks {
   pub row: Vec<PostLink>,
 }
 
-#[derive(Debug, Deserialize_repr)]
+#[derive(Debug, Deserialize_repr, Serialize)]
 #[repr(u8)]
 pub enum PostType {
   Question = 1,
@@ -208,7 +207,7 @@ pub enum PostType {
   PrivilegeWiki = 8,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize)]
 #[serde(rename_all = "PascalCase")]
 pub struct Post {
   #[serde(rename = "@Id")]
@@ -270,12 +269,12 @@ pub struct Post {
   community_owned_date: Option<NaiveDateTime>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize)]
 pub struct Posts {
   pub row: Vec<Post>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize)]
 pub struct Tag {
   #[serde(rename = "@Id")]
   id: String,
@@ -291,12 +290,12 @@ pub struct Tag {
   wiki_post_id: Option<String>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize)]
 pub struct Tags {
   pub row: Vec<Tag>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize)]
 pub struct User {
   #[serde(rename = "@Id")]
   id: String,
@@ -332,12 +331,12 @@ pub struct User {
   account_id: Option<String>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize)]
 pub struct Users {
   pub row: Vec<User>,
 }
 
-#[derive(Debug, Deserialize_repr)]
+#[derive(Debug, Deserialize_repr, Serialize)]
 #[repr(u8)]
 pub enum VoteType {
   AcceptedByOriginator = 1,
@@ -357,7 +356,7 @@ pub enum VoteType {
   ApproveEditSuggestion = 16,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize)]
 pub struct Vote {
  #[serde(rename = "@Id")]
  id: String,
@@ -375,7 +374,7 @@ pub struct Vote {
  bounty_amount: Option<String>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize)]
 pub struct Votes {
   pub row: Vec<Vote>,
 }
