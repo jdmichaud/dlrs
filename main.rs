@@ -381,8 +381,7 @@ fn create_job_list(config: &Config, site_list: String) -> Vec<Job> {
     .collect()
 }
 
-#[tokio::main]
-async fn main() -> Result<()> {
+async fn run() -> Result<()> {
   let config = Config::parse();
   if !config.data_path.exists() {
     std::fs::create_dir_all(config.data_path.clone())?;
@@ -421,16 +420,6 @@ async fn main() -> Result<()> {
     connection.execute("PRAGMA journal_mode = wal;")?;
   }
 
-  crossterm::execute!(stdout(), crossterm::cursor::Hide)?;
-  // Restore the cursor on ctrl-c
-  // TODO: Should probably do it in other circumstances
-  ctrlc::set_handler(|| {
-    let _ = crossterm::execute!(stdout(), crossterm::cursor::Show);
-    // We need to force exit here which is what the default handler does.
-    println!("interrupted");
-    std::process::exit(0);
-  }).expect("Error setting Ctrl-C handler");
-
   // let jobs = Rc::new(RefCell::new(vec![
   //   Job { url: "http://speedtest.ftp.otenet.gr/files/test100k.db".to_string(), filepath: "test100k.db".to_string(), state: State::Wait },
   //   Job { url: "http://speedtest.ftp.otenet.gr/files/test1Mb.db".to_string(), filepath: "test1Mb.db".to_string(), state: State::Wait },
@@ -460,3 +449,26 @@ async fn main() -> Result<()> {
   Ok(())
 }
 
+#[tokio::main]
+async fn main() -> Result<()> {
+  crossterm::execute!(stdout(), crossterm::cursor::Hide)?;
+  // Restore the cursor on ctrl-c
+  ctrlc::set_handler(|| {
+    let _ = crossterm::execute!(stdout(), crossterm::cursor::Show);
+    // We need to force exit here which is what the default handler does.
+    println!("interrupted");
+    std::process::exit(0);
+  }).expect("Error setting Ctrl-C handler");
+  // Restore the cursor on ctrl-c
+  let default_hook = std::panic::take_hook();
+  std::panic::set_hook(Box::new(move |info| {
+    let _ = crossterm::execute!(stdout(), crossterm::cursor::Show);
+    default_hook(info);
+  }));
+  // Restore the cursor on error
+  let result = run().await;
+  if let Err(ref _e) = result { // ref here to avoid partial move outside of error
+    let _ = crossterm::execute!(stdout(), crossterm::cursor::Show);
+  }
+  result
+}
