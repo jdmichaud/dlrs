@@ -8,7 +8,7 @@ edition = "2021"
 [dependencies]
 crossterm = "0.26.1"
 ctrlc = "3.4.0"
-error-chain = "0.12.4"
+anyhow = "1.0"
 futures = "0.3.28"
 reqwest = { version = "0.11.18", features = ['stream'] }
 tokio = { version = "1.29.1", features = ["full"] }
@@ -30,3 +30,9 @@ path = "main.rs"
 name = "decode"
 path = "decode.rs"
 
+[profile.release] # A profile to try to minimize the size
+panic = "abort" # Abort on Panic
+strip = true
+opt-level = "z" # Optimize For Size
+lto = true # Enable Link Time Optimization (LTO)
+codegen-units = 1 # Reduce Parallel Code Generation Units to Increase Optimization

@@ -2,9 +2,8 @@
 #![feature(core_intrinsics)] // for breakpoint
 #![feature(let_chains)] // for macro
 
+use anyhow::Result;
 use clap::Parser;
-use core::convert::Infallible;
-use error_chain::error_chain;
 use futures::StreamExt;
 use quick_xml::events::Event;
 use sevenz_rust;
@@ -33,23 +32,6 @@ struct Config {
   /// Maximum number of parallel threads to use (including max parallel download)
   #[arg(short, long, default_value_t=3)]
   max_threads: u8,
-}
-
-error_chain! {
-  foreign_links {
-    Io(std::io::Error);
-    Reqwest(reqwest::Error);
-    Header(reqwest::header::ToStrError);
-    Parser(quick_xml::Error);
-    Deserializer(quick_xml::DeError);
-    Decompress(sevenz_rust::Error);
-    TryFromIntError(core::num::TryFromIntError);
-    Infallible(Infallible);
-    SystemTimeError(std::time::SystemTimeError);
-    SqliteError(sqlite::Error);
-    SqlUtilsError(sql_utils::Error);
-    Utf8Error(std::str::Utf8Error);
-  }
 }
 
 #[derive(Debug, Clone, Ord, PartialOrd, Eq, PartialEq)]
@@ -173,10 +155,10 @@ let client = reqwest::Client::new();
       .get(url)
       .send()
       .await
-      .or(Err(format!("Failed to GET from '{}'", &url)))?;
+      .or(Err(anyhow::anyhow!("Failed to GET from '{}'", &url)))?;
   let content_length = res
       .content_length()
-      .ok_or(format!("Failed to get content length from '{}'", &url))?;
+      .ok_or(anyhow::anyhow!("Failed to get content length from '{}'", &url))?;
 
   jobs.lock().unwrap()[job_index].state = State::Downloading((0, content_length));
   update_display(&jobs.lock().unwrap())?;
@@ -196,9 +178,9 @@ let client = reqwest::Client::new();
   let mut stream = res.bytes_stream();
 
   while let Some(item) = stream.next().await {
-      let chunk = item.or(Err(format!("Error while downloading file")))?;
+      let chunk = item.or(Err(anyhow::anyhow!("Error while downloading file")))?;
       file.write_all(&chunk)
-          .or(Err(format!("Error while writing to file")))?;
+          .or(Err(anyhow::anyhow!("Error while writing to file")))?;
       let new = std::cmp::min(downloaded + (chunk.len() as u64), content_length);
       downloaded = new;
       jobs.lock().unwrap()[job_index].state = State::Downloading((downloaded, content_length));
@@ -261,7 +243,7 @@ fn inject<R: BufRead, T>(config: &Config, reader: &mut quick_xml::reader::Reader
   loop {
     let mut buf = Vec::new();
     match reader.read_event_into(&mut buf) {
-      Err(e) => error_chain::bail!(
+      Err(e) => anyhow::bail!(
         "Error at position {}: {:?}",
         reader.buffer_position(),
         e
@@ -294,7 +276,9 @@ fn inject<R: BufRead, T>(config: &Config, reader: &mut quick_xml::reader::Reader
 fn get_site_from_filepath(filepath: &PathBuf) -> Result<String> {
   let mut filepath = filepath.clone();
   filepath.pop();
-  return Ok(filepath.file_stem().ok_or("Could not retrieve site")?.to_string_lossy().to_string());
+  return Ok(filepath.file_stem()
+    .ok_or(anyhow::anyhow!("Could not retrieve site"))?
+    .to_string_lossy().to_string());
 }
 
 fn table_exists(database_filename: &str, table_name: &str, mutex: Arc<Mutex<bool>>) -> Result<bool> {
@@ -324,7 +308,7 @@ macro_rules! do_load_se_file {
         let mut xmlreader = quick_xml::Reader::from_reader(reader);
         inject::<std::io::BufReader<File>, $t>($config, &mut xmlreader, &table_name, $mutex)?
       } else {
-        error_chain::bail!("file {:?} do not exists", filepath)
+        anyhow::bail!("file {:?} do not exists", filepath)
       }
     }
   };
@@ -406,7 +390,7 @@ async fn main() -> Result<()> {
 
   let jobs = if let Some(site_list)  = config.site_list.clone() {
     if !site_list.exists() {
-      Err(format!("site list file {:?} does not exists", site_list))
+      Err(anyhow::anyhow!("site list file {:?} does not exists", site_list))
     } else {
       let site_list = std::fs::read_to_string(site_list)?.parse()?;
       Ok(Arc::new(Mutex::new(create_job_list(&config, site_list))))
@@ -455,16 +439,6 @@ async fn main() -> Result<()> {
   update_display(&jobs.lock().unwrap())?;
 
   let nbjobs = jobs.lock().unwrap().len();
-
-  // {
-  //   // We convert the jobs to futures that we will wait simultaneously
-  //   // Concurrent requests (https://gist.github.com/joseluisq/e7f926d73e02fb9dd6114f4d8be6607d)
-  //   let tasks = futures::stream::iter(
-  //     (0..nbjobs).map(|index| process(config.clone(), jobs.clone(), index))
-  //   ).buffer_unordered(3).collect::<Vec<_>>();
-  //   // Waiting on all the future
-  //   tasks.await;
-  // }
 
   {
     // Here we spawn the jobs for parallel processing
