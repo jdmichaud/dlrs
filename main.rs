@@ -2,20 +2,15 @@
 #![feature(core_intrinsics)] // for breakpoint
 #![feature(let_chains)] // for macro
 
-use bytes::Buf;
 use clap::Parser;
 use core::convert::Infallible;
 use error_chain::error_chain;
 use futures::StreamExt;
 use quick_xml::events::Event;
-use reqwest::header::{HeaderValue, CONTENT_LENGTH, RANGE};
-use reqwest::StatusCode;
 use sevenz_rust;
 use std::fs::File;
 use std::io::{BufRead, stdout, Write};
-use std::str::FromStr;
 use std::sync::{Arc, Mutex};
-use std::time::Instant;
 use std::path::{Path, PathBuf};
 use sqlite::Connection;
 use tokio;
@@ -61,7 +56,7 @@ error_chain! {
 enum State {
   Error(String),
   Wait,
-  Downloading((usize, usize)),
+  Downloading((u64, u64)),
   Unzipping(u8),
   Parsing((u8, String)),
   Done,
@@ -137,7 +132,7 @@ fn update_display(jobs: &Vec<Job>) -> Result<()> {
           print!(" {:width$}  ", " ", width = progress_bar_width);
           let position = crossterm::cursor::position()?;
           let max: usize = (terminal_size.0).saturating_sub(position.0).saturating_sub(1) as usize;
-          print!("{}", &label[..max]);
+          print!("{}", &label[..std::cmp::min(max, label.len())]);
         },
       }
       if index <= current_jobs.len() - 1 {
@@ -167,20 +162,25 @@ fn get_data_path(filepath: &Path) -> PathBuf {
 }
 
 async fn download(_config: &Config, jobs: &Arc<Mutex<Vec<Job>>>, job_index: usize, _mutex: Arc<Mutex<bool>>) -> Result<()> {
-  let mut chunk_size: usize = 1024 * 1024;
-
+  // inspired by https://gist.github.com/giuliano-oliveira/4d11d6b3bb003dba3a1b53f43d81b30d
   let url = &jobs.lock().unwrap()[job_index].url.clone();
-  if url == "" { return Ok(()) }
+  if url == "" { return Ok(()) } // If the job is not created from the site list, not download is needed
   let filename = &jobs.lock().unwrap()[job_index].filepath.clone();
 
-  let client = reqwest::Client::new();
-  // Remotely get the size of the file to download
-  let response = client.head(url).send().await?;
-  let content_length = response
-    .headers()
-    .get(CONTENT_LENGTH)
-    .ok_or("response doesn't include the content length")?;
-  let content_length = u64::from_str(content_length.to_str()?).map_err(|_| "invalid Content-Length header")?;
+let client = reqwest::Client::new();
+
+  let res = client
+      .get(url)
+      .send()
+      .await
+      .or(Err(format!("Failed to GET from '{}'", &url)))?;
+  let content_length = res
+      .content_length()
+      .ok_or(format!("Failed to get content length from '{}'", &url))?;
+
+  jobs.lock().unwrap()[job_index].state = State::Downloading((0, content_length));
+  update_display(&jobs.lock().unwrap())?;
+
   // Check if the file exists...
   if let Ok(metadata) = std::fs::metadata(filename) {
     // ...and if it does, get its size and compare with the size of the file on the server
@@ -189,36 +189,20 @@ async fn download(_config: &Config, jobs: &Arc<Mutex<Vec<Job>>>, job_index: usiz
       return Ok(());
     }
   }
-  let mut output_file = std::io::BufWriter::new(File::create(filename)?);
 
-  jobs.lock().unwrap()[job_index].state = State::Downloading((0, 0));
-  update_display(&jobs.lock().unwrap())?;
-  let mut downloaded: usize = 0;
-  while downloaded <= content_length.try_into().unwrap() {
-    let now = Instant::now();
-    let range_end = std::cmp::max(downloaded.saturating_add(chunk_size), content_length.try_into().unwrap());
-    let range_header = HeaderValue::from_str(&format!("bytes={}-{}", downloaded, range_end))
-      .expect("string provided by format!");
-    let response = client.get(url).header(RANGE, range_header).send().await?;
+  // download chunks
+  let mut file = File::create(filename)?;
+  let mut downloaded: u64 = 0;
+  let mut stream = res.bytes_stream();
 
-    let status = response.status();
-    if !(status == StatusCode::OK || status == StatusCode::PARTIAL_CONTENT) {
-      error_chain::bail!("Unexpected server response: {}", status)
-    }
-
-    let content = bytes::Bytes::from(response.bytes().await?);
-    // Some server do not honor the range request (like python's SimpleHTTPServer) so we need to
-    // keep track of what is downloaded and stop when we are done.
-    downloaded += content.len();
-    std::io::copy(&mut content.reader(), &mut output_file)?;
-    jobs.lock().unwrap()[job_index].state = State::Downloading((downloaded, content_length.try_into().unwrap()));
-    update_display(&jobs.lock().unwrap())?;
-    // Adapt the chunk size to get a display update every seconds ideally
-    if now.elapsed().as_millis() > 1000 {
-      chunk_size = (chunk_size as f32 * 0.7) as usize;
-    } else {
-      chunk_size = (chunk_size as f32 * 1.05) as usize;
-    }
+  while let Some(item) = stream.next().await {
+      let chunk = item.or(Err(format!("Error while downloading file")))?;
+      file.write_all(&chunk)
+          .or(Err(format!("Error while writing to file")))?;
+      let new = std::cmp::min(downloaded + (chunk.len() as u64), content_length);
+      downloaded = new;
+      jobs.lock().unwrap()[job_index].state = State::Downloading((downloaded, content_length));
+      update_display(&jobs.lock().unwrap())?;
   }
 
   Ok(())
@@ -313,45 +297,63 @@ fn get_site_from_filepath(filepath: &PathBuf) -> Result<String> {
   return Ok(filepath.file_stem().ok_or("Could not retrieve site")?.to_string_lossy().to_string());
 }
 
+fn table_exists(database_filename: &str, table_name: &str, mutex: Arc<Mutex<bool>>) -> Result<bool> {
+  let _mutex = mutex.lock().unwrap();
+  let connection = Connection::open(database_filename)?;
+  let mut result = false;
+  connection.iterate(format!("SELECT name FROM sqlite_master WHERE name = \"{}\";", table_name), |pairs| {
+    result = pairs.len() > 0;
+    return true;
+  })?;
+
+  Ok(result)
+}
+
 macro_rules! do_load_se_file {
-  ($config:ident, $filename:expr, $t:path, $completion:expr, $jobs:expr, $job_index:expr, $mutex:expr) => {
+  ($config:ident, $filename:expr, $table_suffix:expr, $t:path, $completion:expr, $jobs:expr, $job_index:expr, $mutex:expr) => {
     let mut filepath = get_data_path(&PathBuf::from(&$jobs.lock().unwrap()[$job_index].filepath));
     filepath.push($filename);
     let sfilepath = filepath.to_string_lossy().to_string();
-    $jobs.lock().unwrap()[$job_index].state = State::Parsing(($completion, sfilepath.clone()));
-    update_display(&$jobs.lock().unwrap())?;
-    if filepath.exists() {
-      let f = File::open(&sfilepath)?;
-      let reader = std::io::BufReader::new(f);
-      let mut xmlreader = quick_xml::Reader::from_reader(reader);
-      // let foo: $t = quick_xml::de::from_reader(reader)?;
-      // Some(foo.row)
-      let table_name = &get_site_from_filepath(&filepath)?;
-      inject::<std::io::BufReader<File>, $t>($config, &mut xmlreader, table_name, $mutex)?
-    } else { /* What to do? */ }
+    let table_name = format!("{}_{}", get_site_from_filepath(&filepath)?, $table_suffix);
+    if let Ok(result) = table_exists(&$config.database_filename.to_string_lossy(), &table_name, $mutex) && !result {
+      $jobs.lock().unwrap()[$job_index].state = State::Parsing(($completion, sfilepath.clone()));
+      update_display(&$jobs.lock().unwrap())?;
+      if filepath.exists() {
+        let f = File::open(&sfilepath)?;
+        let reader = std::io::BufReader::new(f);
+        let mut xmlreader = quick_xml::Reader::from_reader(reader);
+        inject::<std::io::BufReader<File>, $t>($config, &mut xmlreader, &table_name, $mutex)?
+      } else {
+        error_chain::bail!("file {:?} do not exists", filepath)
+      }
+    }
   };
 }
 
 async fn parse(config: &Config, jobs: &Arc<Mutex<Vec<Job>>>, job_index: usize, mutex: Arc<Mutex<bool>>) -> Result<()> {
-  do_load_se_file!(config, "Badges.xml", se_struct::Badge, 0, jobs, job_index, mutex.clone());
-  do_load_se_file!(config, "Comments.xml", se_struct::Comment, 10, jobs, job_index, mutex.clone());
-  do_load_se_file!(config, "PostHistory.xml", se_struct::PostHistory, 40, jobs, job_index, mutex.clone());
-  do_load_se_file!(config, "PostLinks.xml", se_struct::PostLink, 50, jobs, job_index, mutex.clone());
-  do_load_se_file!(config, "Posts.xml", se_struct::Post, 60, jobs, job_index, mutex.clone());
-  do_load_se_file!(config, "Tags.xml", se_struct::Tag, 70, jobs, job_index, mutex.clone());
-  do_load_se_file!(config, "Users.xml", se_struct::User, 80, jobs, job_index, mutex.clone());
-  do_load_se_file!(config, "Votes.xml", se_struct::Vote, 90, jobs, job_index, mutex.clone());
+  do_load_se_file!(config, "Badges.xml", "Badge", se_struct::Badge, 0, jobs, job_index, mutex.clone());
+  do_load_se_file!(config, "Comments.xml", "Comment", se_struct::Comment, 10, jobs, job_index, mutex.clone());
+  do_load_se_file!(config, "PostHistory.xml", "PostHistory", se_struct::PostHistory, 40, jobs, job_index, mutex.clone());
+  do_load_se_file!(config, "PostLinks.xml", "PostLink", se_struct::PostLink, 50, jobs, job_index, mutex.clone());
+  do_load_se_file!(config, "Posts.xml", "Post", se_struct::Post, 60, jobs, job_index, mutex.clone());
+  do_load_se_file!(config, "Tags.xml", "Tag", se_struct::Tag, 70, jobs, job_index, mutex.clone());
+  do_load_se_file!(config, "Users.xml", "User", se_struct::User, 80, jobs, job_index, mutex.clone());
+  do_load_se_file!(config, "Votes.xml", "Vote", se_struct::Vote, 90, jobs, job_index, mutex.clone());
 
   Ok(())
 }
 
 // Will asynchronously call the various functions of the provided job.
 // It is the responsibility of these function to call update_display regularly.
+// `mutex` here is used if threads need a mutual exclusion of some kind. Now used for writing to the DB.
 async fn process(config: Config, jobs: Arc<Mutex<Vec<Job>>>, job_index: usize, mutex: Arc<Mutex<bool>>) -> Result<()> {
   match download(&config, &jobs, job_index, mutex.clone()).await {
     Err(e) => {
-      jobs.lock().unwrap()[job_index].state = State::Error(format!("download error: {}", e));
-      update_display(&jobs.lock().unwrap())?;
+      {
+        let mut jobs = jobs.lock().unwrap();
+        jobs[job_index].state = State::Error(format!("download error: {} ({})", e, jobs[job_index].url));
+        update_display(&jobs)?;
+      }
       return Err(e);
     },
     _ => (),
@@ -385,6 +387,9 @@ fn create_job_list(config: &Config, site_list: String) -> Vec<Job> {
     .filter(|line| line.len() != 0)
     .map(|line| {
       let split = line.split_whitespace().map(|s| s).collect::<Vec<&str>>();
+      if split.len() != 2 {
+        panic!("Incorrect format in site list file: {line}");
+      }
       let mut filepath = config.data_path.clone();
       filepath.push(split[0].to_string());
       Job { url: split[1].to_string(), filepath: filepath.to_string_lossy().to_string(), state: State::Wait }

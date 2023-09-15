@@ -95,7 +95,7 @@ pub struct Serializer {
   sql_value: Option<SqlValue>,
   insert_stmt: String,
   create_stmt: String,
-  table_prefix: String,
+  table_name: String,
   keys: Vec<(String, SqlValue)>,
   values: Vec<SqlValue>,
 }
@@ -103,12 +103,12 @@ pub struct Serializer {
 // Creates a "create" statement. To be executable once to create the table and
 // creates an insert query used to prepare a statement.
 // INSERT INTO table VALUE (?, ?, ...)
-pub fn to_init_table<T>(value: &T, table_prefix: &str) -> Result<(String, String)> where T: Serialize {
+pub fn to_init_table<T>(value: &T, table_name: &str) -> Result<(String, String)> where T: Serialize {
   let mut serializer = Serializer {
     sql_value: None,
     insert_stmt: String::new(),
     create_stmt: String::new(),
-    table_prefix: table_prefix.to_string(),
+    table_name: table_name.to_string(),
     keys: Vec::new(),
     values: Vec::new(),
   };
@@ -225,19 +225,15 @@ impl<'a> ser::Serializer for &'a mut Serializer {
   }
   fn serialize_struct(
     self,
-    name: &'static str,
+    _name: &'static str,
     len: usize,
   ) -> Result<Self::SerializeStruct> {
     self.insert_stmt += "INSERT INTO [";
-    self.insert_stmt += &self.table_prefix;
-    self.insert_stmt += "_";
-    self.insert_stmt += name;
+    self.insert_stmt += &self.table_name;
     self.insert_stmt += "] (";
 
     self.create_stmt += "CREATE TABLE IF NOT EXISTS [";
-    self.create_stmt += &self.table_prefix;
-    self.create_stmt += "_";
-    self.create_stmt += name;
+    self.create_stmt += &self.table_name;
     self.create_stmt += "] (";
     self.serialize_map(Some(len))
   }
@@ -310,7 +306,7 @@ impl<'a> ser::SerializeStruct for &'a mut Serializer {
     {
       let mut serializer = Serializer {
         sql_value: None,
-        table_prefix: self.table_prefix.clone(),
+        table_name: self.table_name.clone(),
         insert_stmt: String::from(""),
         create_stmt: String::from(""),
         keys: Vec::new(),
@@ -328,7 +324,7 @@ impl<'a> ser::SerializeStruct for &'a mut Serializer {
     {
       let mut serializer = Serializer {
         sql_value: None,
-        table_prefix: self.table_prefix.clone(),
+        table_name: self.table_name.clone(),
         insert_stmt: String::from(""),
         create_stmt: String::from(""),
         keys: Vec::new(),
