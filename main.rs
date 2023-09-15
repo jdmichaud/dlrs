@@ -30,8 +30,8 @@ struct Config {
   #[arg(short='f', long, default_value=PathBuf::from("./data").into_os_string(), value_name = "PATH")]
   data_path: PathBuf,
   /// List of files/urls to download
-  #[arg(short, long, default_value=PathBuf::from("site.list").into_os_string(), value_name = "FILE")]
-  site_list: PathBuf,
+  #[arg(short, long, /*default_value=PathBuf::from("site.list").into_os_string(), */value_name = "FILE")]
+  site_list: Option<PathBuf>,
   /// database file
   #[arg(short, long, default_value=PathBuf::from("dlrs.db").into_os_string(), value_name = "FILE")]
   database_filename: PathBuf,
@@ -170,6 +170,7 @@ async fn download(_config: &Config, jobs: &Arc<Mutex<Vec<Job>>>, job_index: usiz
   let mut chunk_size: usize = 1024 * 1024;
 
   let url = &jobs.lock().unwrap()[job_index].url.clone();
+  if url == "" { return Ok(()) }
   let filename = &jobs.lock().unwrap()[job_index].filepath.clone();
 
   let client = reqwest::Client::new();
@@ -269,7 +270,6 @@ fn inject<R: BufRead, T>(config: &Config, reader: &mut quick_xml::reader::Reader
   where T: serde::Serialize + for<'de> serde::Deserialize<'de> {
   let _lock = mutex.lock().unwrap(); // Take a mutex so that database access are not concurrent.
   let connection = Connection::open(&config.database_filename)?;
-  // println!("BEGIN TRANSACTION; {}", table_name);
   connection.execute("BEGIN TRANSACTION;")?;
 
   let mut insert_statement = connection.prepare("")?;
@@ -285,12 +285,9 @@ fn inject<R: BufRead, T>(config: &Config, reader: &mut quick_xml::reader::Reader
       Ok(Event::Eof) => break,
       Ok(Event::Empty(e)) => {
         let s = format!("<{}/>", std::str::from_utf8(&e)?);
-        // println!("s {}", s);
         let tag: T = quick_xml::de::from_str(&s)?;
         if count == 0 {
           let (create_stmt, insert_stmt) = sql_utils::to_init_table(&tag, table_name)?;
-          // println!("{}", create_stmt);
-          // println!("{}", insert_stmt);
           connection.execute(create_stmt)?;
           insert_statement = connection.prepare(insert_stmt)?;
         }
@@ -306,7 +303,6 @@ fn inject<R: BufRead, T>(config: &Config, reader: &mut quick_xml::reader::Reader
     }
   }
 
-  // println!("END TRANSACTION {}", table_name);
   connection.execute("END TRANSACTION;")?;
   Ok(())
 }
@@ -402,8 +398,32 @@ async fn main() -> Result<()> {
   if !config.data_path.exists() {
     std::fs::create_dir_all(config.data_path.clone())?;
   }
-  if !config.site_list.exists() {
-    return Err(format!("site list file {:?} does not exists", config.site_list))?;
+
+  let jobs = if let Some(site_list)  = config.site_list.clone() {
+    if !site_list.exists() {
+      Err(format!("site list file {:?} does not exists", site_list))
+    } else {
+      let site_list = std::fs::read_to_string(site_list)?.parse()?;
+      Ok(Arc::new(Mutex::new(create_job_list(&config, site_list))))
+    }
+  } else {
+    Ok(Arc::new(Mutex::new(Vec::new())))
+  }?;
+  // if the job list is empty here, it is because no files where provided to
+  // download. So we will just be looking into the data folder and see what
+  // 7z files there is to unzip. This scenario might happen if the user downloaded
+  // the files by other means (like torrent).
+  {
+    let mut jobs = jobs.lock().unwrap();
+    if jobs.len() == 0 {
+      jobs.append(&mut std::fs::read_dir(config.data_path.clone())?
+        .map(|entry| entry.unwrap().path())
+        .filter(|path| path.extension().unwrap().to_string_lossy() == "7z")
+        .map(|path| Job {
+          url: String::from(""), filepath: path.to_string_lossy().to_string(), state: State::Wait,
+        })
+      .collect::<Vec<Job>>());
+    }
   }
 
   // Set in Write Ahead Logging to allow simultaneous transactions
@@ -411,8 +431,6 @@ async fn main() -> Result<()> {
     let connection = Connection::open(&config.database_filename)?;
     connection.execute("PRAGMA journal_mode = wal;")?;
   }
-
-  let site_list = std::fs::read_to_string(config.site_list.clone())?.parse()?;
 
   crossterm::execute!(stdout(), crossterm::cursor::Hide)?;
   // Restore the cursor on ctrl-c
@@ -424,7 +442,6 @@ async fn main() -> Result<()> {
     std::process::exit(0);
   }).expect("Error setting Ctrl-C handler");
 
-  let jobs = Arc::new(Mutex::new(create_job_list(&config, site_list)));
   // let jobs = Rc::new(RefCell::new(vec![
   //   Job { url: "http://speedtest.ftp.otenet.gr/files/test100k.db".to_string(), filepath: "test100k.db".to_string(), state: State::Wait },
   //   Job { url: "http://speedtest.ftp.otenet.gr/files/test1Mb.db".to_string(), filepath: "test1Mb.db".to_string(), state: State::Wait },
