@@ -166,7 +166,7 @@ fn get_data_path(filepath: &Path) -> PathBuf {
   output_path
 }
 
-async fn download(_config: Arc<Mutex<Config>>, jobs: &Arc<Mutex<Vec<Job>>>, job_index: usize) -> Result<()> {
+async fn download(_config: &Config, jobs: &Arc<Mutex<Vec<Job>>>, job_index: usize, _mutex: Arc<Mutex<bool>>) -> Result<()> {
   let mut chunk_size: usize = 1024 * 1024;
 
   let url = &jobs.lock().unwrap()[job_index].url.clone();
@@ -223,7 +223,7 @@ async fn download(_config: Arc<Mutex<Config>>, jobs: &Arc<Mutex<Vec<Job>>>, job_
   Ok(())
 }
 
-async fn unzip(_config: Arc<Mutex<Config>>, jobs: &Arc<Mutex<Vec<Job>>>, job_index: usize) -> Result<()> {
+async fn unzip(_config: &Config, jobs: &Arc<Mutex<Vec<Job>>>, job_index: usize, _mutex: Arc<Mutex<bool>>) -> Result<()> {
   let filepath = &jobs.lock().unwrap()[job_index].filepath.clone();
   // https://github.com/dyz1990/sevenz-rust/blob/main/examples/decompress_progress.rs
   let mut sz = sevenz_rust::SevenZReader::open(filepath, "".into())?;
@@ -264,10 +264,10 @@ async fn unzip(_config: Arc<Mutex<Config>>, jobs: &Arc<Mutex<Vec<Job>>>, job_ind
   Ok(())
 }
 
-fn inject<R: BufRead, T>(config: Arc<Mutex<Config>>, reader: &mut quick_xml::reader::Reader<R>,
-  table_name: &str) -> Result<()>
+fn inject<R: BufRead, T>(config: &Config, reader: &mut quick_xml::reader::Reader<R>,
+  table_name: &str, mutex: Arc<Mutex<bool>>) -> Result<()>
   where T: serde::Serialize + for<'de> serde::Deserialize<'de> {
-  let config = config.lock().unwrap(); // Take a mutex so that database access are not concurrent.
+  let _lock = mutex.lock().unwrap(); // Take a mutex so that database access are not concurrent.
   let connection = Connection::open(&config.database_filename)?;
   // println!("BEGIN TRANSACTION; {}", table_name);
   connection.execute("BEGIN TRANSACTION;")?;
@@ -318,7 +318,7 @@ fn get_site_from_filepath(filepath: &PathBuf) -> Result<String> {
 }
 
 macro_rules! do_load_se_file {
-  ($config:ident, $filename:expr, $t:path, $completion:expr, $jobs:expr, $job_index:expr) => {
+  ($config:ident, $filename:expr, $t:path, $completion:expr, $jobs:expr, $job_index:expr, $mutex:expr) => {
     let mut filepath = get_data_path(&PathBuf::from(&$jobs.lock().unwrap()[$job_index].filepath));
     filepath.push($filename);
     let sfilepath = filepath.to_string_lossy().to_string();
@@ -331,28 +331,28 @@ macro_rules! do_load_se_file {
       // let foo: $t = quick_xml::de::from_reader(reader)?;
       // Some(foo.row)
       let table_name = &get_site_from_filepath(&filepath)?;
-      inject::<std::io::BufReader<File>, $t>($config.clone(), &mut xmlreader, table_name)?
+      inject::<std::io::BufReader<File>, $t>($config, &mut xmlreader, table_name, $mutex)?
     } else { /* What to do? */ }
   };
 }
 
-async fn parse(config: Arc<Mutex<Config>>, jobs: &Arc<Mutex<Vec<Job>>>, job_index: usize) -> Result<()> {
-  do_load_se_file!(config, "Badges.xml", se_struct::Badge, 0, jobs, job_index);
-  do_load_se_file!(config, "Comments.xml", se_struct::Comment, 10, jobs, job_index);
-  do_load_se_file!(config, "PostHistory.xml", se_struct::PostHistory, 40, jobs, job_index);
-  do_load_se_file!(config, "PostLinks.xml", se_struct::PostLink, 50, jobs, job_index);
-  do_load_se_file!(config, "Posts.xml", se_struct::Post, 60, jobs, job_index);
-  do_load_se_file!(config, "Tags.xml", se_struct::Tag, 70, jobs, job_index);
-  do_load_se_file!(config, "Users.xml", se_struct::User, 80, jobs, job_index);
-  do_load_se_file!(config, "Votes.xml", se_struct::Vote, 90, jobs, job_index);
+async fn parse(config: &Config, jobs: &Arc<Mutex<Vec<Job>>>, job_index: usize, mutex: Arc<Mutex<bool>>) -> Result<()> {
+  do_load_se_file!(config, "Badges.xml", se_struct::Badge, 0, jobs, job_index, mutex.clone());
+  do_load_se_file!(config, "Comments.xml", se_struct::Comment, 10, jobs, job_index, mutex.clone());
+  do_load_se_file!(config, "PostHistory.xml", se_struct::PostHistory, 40, jobs, job_index, mutex.clone());
+  do_load_se_file!(config, "PostLinks.xml", se_struct::PostLink, 50, jobs, job_index, mutex.clone());
+  do_load_se_file!(config, "Posts.xml", se_struct::Post, 60, jobs, job_index, mutex.clone());
+  do_load_se_file!(config, "Tags.xml", se_struct::Tag, 70, jobs, job_index, mutex.clone());
+  do_load_se_file!(config, "Users.xml", se_struct::User, 80, jobs, job_index, mutex.clone());
+  do_load_se_file!(config, "Votes.xml", se_struct::Vote, 90, jobs, job_index, mutex.clone());
 
   Ok(())
 }
 
 // Will asynchronously call the various functions of the provided job.
 // It is the responsibility of these function to call update_display regularly.
-async fn process(config: Arc<Mutex<Config>>, jobs: Arc<Mutex<Vec<Job>>>, job_index: usize) -> Result<()> {
-  match download(config.clone(), &jobs, job_index).await {
+async fn process(config: Config, jobs: Arc<Mutex<Vec<Job>>>, job_index: usize, mutex: Arc<Mutex<bool>>) -> Result<()> {
+  match download(&config, &jobs, job_index, mutex.clone()).await {
     Err(e) => {
       jobs.lock().unwrap()[job_index].state = State::Error(format!("download error: {}", e));
       update_display(&jobs.lock().unwrap())?;
@@ -360,7 +360,7 @@ async fn process(config: Arc<Mutex<Config>>, jobs: Arc<Mutex<Vec<Job>>>, job_ind
     },
     _ => (),
   };
-  match unzip(config.clone(), &jobs, job_index).await {
+  match unzip(&config, &jobs, job_index, mutex.clone()).await {
     Err(e) => {
       jobs.lock().unwrap()[job_index].state = State::Error(format!("decompression error: {}", e));
       update_display(&jobs.lock().unwrap())?;
@@ -368,7 +368,7 @@ async fn process(config: Arc<Mutex<Config>>, jobs: Arc<Mutex<Vec<Job>>>, job_ind
     },
     _ => (),
   }
-  match parse(config.clone(), &jobs, job_index).await {
+  match parse(&config, &jobs, job_index, mutex.clone()).await {
     Err(e) => {
       jobs.lock().unwrap()[job_index].state = State::Error(format!("parsing error: {}", e));
       update_display(&jobs.lock().unwrap())?;
@@ -446,12 +446,11 @@ async fn main() -> Result<()> {
 
   {
     // Here we spawn the jobs for parallel processing
-    let max_threads =  config.max_threads;
-    let arc_config = Arc::new(Mutex::new(config));
     let mut tokio_jobs = futures::stream::FuturesUnordered::new();
+    let thread_mutex = Arc::new(Mutex::new(true));
     for index in 0..nbjobs {
-      tokio_jobs.push(tokio::spawn(process(arc_config.clone(), jobs.clone(), index)));
-      if tokio_jobs.len() == max_threads as usize {
+      tokio_jobs.push(tokio::spawn(process(config.clone(), jobs.clone(), index, thread_mutex.clone())));
+      if tokio_jobs.len() == config.max_threads as usize {
         tokio_jobs.next().await;
       }
     }
