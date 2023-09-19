@@ -1,7 +1,47 @@
 #![allow(unused)]
 
+/**
+ * Serded rust structure matching Stack Exchange data table.
+ * source: https://meta.stackexchange.com/a/2678
+ *
+ * The strange technical decisions made in this file are a direct result of:
+ * 1. The input format file provided by Stack Exchange
+ * 2. The limitations of quick_xml and serde
+ *
+ * The flow of information is as follows:
+ * xml (stackechange) ----> sql ----> json
+ *
+ * We could the XML format to look like this:
+ * ```
+ * <posts>
+ *   <post>
+ *     <id>23</id>
+ *     <body>This is a post</body>
+ *   </post>
+ *   [...]
+ * </posts>
+ * ```
+ * Where in reality, the file is presented this way:
+ * ```
+ * <posts>
+ *   <row Id="" Body="This is a post"/>
+ *   [...]
+ * </posts>
+ * ```
+ * quick_xml was not design to handle data fields as attribute and due to serde
+ * limitations a workaround is needed to read the struct field from the attributes.
+ * We need to prefix the field name with '@' (`#[serde(rename = "@Id"`). As a
+ * consequence, any downstream Serializer/Deserializer will have to deal with
+ * removing that prefix in order to deal with regularly named field (see the
+ * sql Serializer for example).
+ * Moreover, because data comes from attributes, everything is treated as a
+ * string and necessitate some massaging in order to fit in a reasonable model.
+ * For example, we want our IDs to be integer so that sql is able to index them
+ * quickly. That's why "deserialize_with" are being used here and there.
+ */
 use serde_with::chrono::naive::NaiveDateTime;
 use serde::{Deserialize, Serialize};
+use serde::de::Error;
 use serde_repr::Deserialize_repr;
 
 mod naive_date_parser {
@@ -38,6 +78,31 @@ mod naive_date_parser {
 
 use naive_date_parser::from_rfc3339_without_timezone;
 
+// Because of https://github.com/serde-rs/serde/issues/1183, quick_xml is not
+// able to convert attribute to something else than a String
+// (https://github.com/tafia/quick-xml/issues/433). However, using a custom
+// deserializer (https://stackoverflow.com/a/46755370/2603925) we can get
+// the ids as integers and thus allow faster indexing in the DB and properly
+// formated JSON.
+fn from_string<'de, D>(deserializer: D) -> Result<i64, D::Error>
+where
+  D: serde::Deserializer<'de>,
+{
+  let s: &str = Deserialize::deserialize(deserializer)?;
+  i64::from_str_radix(s, 10).map_err(D::Error::custom)
+}
+
+fn from_string_optional<'de, D>(deserializer: D) -> Result<Option<i64>, D::Error>
+where
+  D: serde::Deserializer<'de>,
+{
+  if let Some(s) = Deserialize::deserialize(deserializer)? {
+    Ok(Some(i64::from_str_radix(s, 10).map_err(D::Error::custom)?))
+  } else {
+    Ok(None)
+  }
+}
+
 #[derive(Debug, Deserialize_repr, Serialize)]
 #[repr(u8)]
 pub enum BadgeClass {
@@ -48,10 +113,10 @@ pub enum BadgeClass {
 
 #[derive(Debug, Deserialize, Serialize)]
 pub struct Badge {
-  #[serde(rename = "@Id")]
-  id: String,
-  #[serde(rename = "@UserId")]
-  user_id: String,
+  #[serde(rename = "@Id", deserialize_with = "from_string")]
+  id: i64,
+  #[serde(rename = "@UserId", deserialize_with = "from_string")]
+  user_id: i64,
   #[serde(rename = "@Name")]
   name: String,
   #[serde(with = "NaiveDateTime")]
@@ -71,12 +136,11 @@ pub struct Badges {
 }
 
 #[derive(Debug, Deserialize, Serialize)]
-#[serde(rename_all = "PascalCase")]
 pub struct Comment {
-  #[serde(rename = "@Id")]
-  id: String,
-  #[serde(rename = "@PostId")]
-  post_id: String,
+  #[serde(rename = "@Id", deserialize_with = "from_string")]
+  id: i64,
+  #[serde(rename = "@PostId", deserialize_with = "from_string")]
+  post_id: i64,
   #[serde(rename = "@Score")]
   score: i64,
   #[serde(rename = "@Text")]
@@ -87,8 +151,8 @@ pub struct Comment {
   // populated if a user has been removed and no longer referenced by user Id
   #[serde(rename = "@UserDisplayName")]
   user_display_name: Option<String>,
-  #[serde(rename = "@UserId")]
-  user_id: Option<String>,
+  #[serde(rename = "@UserId", deserialize_with = "from_string_optional", default)]
+  user_id: Option<i64>,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -134,21 +198,21 @@ pub enum PostHistoryType {
 
 #[derive(Debug, Deserialize, Serialize)]
 pub struct PostHistory {
-  #[serde(rename = "@Id")]
-  id: String,
+  #[serde(rename = "@Id", deserialize_with = "from_string")]
+  id: i64,
   #[serde(rename = "@PostHistoryTypeId")]
   // This field changes probably very often, might not be wise to use a fixed enum here
   post_history_type_id: i16, // PostHistoryType
-  #[serde(rename = "@PostId")]
-  post_id: String,
+  #[serde(rename = "@PostId", deserialize_with = "from_string")]
+  post_id: i64,
   // At times more than one type of history record can be recorded by a single action.  All of these will be grouped using the same RevisionGUID
   #[serde(rename = "@RevisionGUID")]
   revision_guid: String,
   #[serde(with = "NaiveDateTime")]
   #[serde(rename = "@CreationDate")]
   creation_date: NaiveDateTime,
-  #[serde(rename = "@UserId")]
-  user_id: Option<String>,
+  #[serde(rename = "@UserId", deserialize_with = "from_string_optional", default)]
+  user_id: Option<i64>,
   // populated if a user has been removed and no longer referenced by user Id
   #[serde(rename = "@UserDisplayName")]
   user_display_name: Option<String>,
@@ -176,15 +240,15 @@ pub enum LinkType {
 
 #[derive(Debug, Deserialize, Serialize)]
 pub struct PostLink {
- #[serde(rename = "@Id")]
- id: String,
+ #[serde(rename = "@Id", deserialize_with = "from_string")]
+ id: i64,
  #[serde(with = "NaiveDateTime")]
  #[serde(rename = "@CreationDate")]
  creation_date: NaiveDateTime,
- #[serde(rename = "@PostId")]
- post_id: String,
- #[serde(rename = "@RelatedPostId")]
- related_post_id: String,
+ #[serde(rename = "@PostId", deserialize_with = "from_string")]
+ post_id: i64,
+ #[serde(rename = "@RelatedPostId", deserialize_with = "from_string")]
+ related_post_id: i64,
  #[serde(rename = "@LinkTypeId")]
  link_type_id: LinkType,
 }
@@ -208,18 +272,17 @@ pub enum PostType {
 }
 
 #[derive(Debug, Deserialize, Serialize)]
-#[serde(rename_all = "PascalCase")]
 pub struct Post {
-  #[serde(rename = "@Id")]
-  id: String,
+  #[serde(rename = "@Id", deserialize_with = "from_string")]
+  id: i64,
   #[serde(rename = "@PostTypeId")]
   post_type_id: PostType,
   // only present if PostTypeId is 2
-  #[serde(rename = "@ParentId")]
-  parent_id: Option<String>,
+  #[serde(rename = "@ParentId", deserialize_with = "from_string_optional", default)]
+  parent_id: Option<i64>,
   // only present if PostTypeId is 1
-  #[serde(rename = "@AcceptedAnswerId")]
-  accepted_answer_id: Option<String>,
+  #[serde(rename = "@AcceptedAnswerId", deserialize_with = "from_string_optional", default)]
+  accepted_answer_id: Option<i64>,
   #[serde(with = "NaiveDateTime")]
   #[serde(rename = "@CreationDate")]
   creation_date: NaiveDateTime,
@@ -234,13 +297,13 @@ pub struct Post {
   view_count: Option<i64>,
   #[serde(rename = "@Body")]
   body: String,
-  #[serde(rename = "@OwnerUserId")]
-  owner_user_id: Option<String>,
+  #[serde(rename = "@OwnerUserId", deserialize_with = "from_string_optional", default)]
+  owner_user_id: Option<i64>,
   // populated if a user has been removed and no longer referenced by user Id or if the user was anonymous
   #[serde(rename = "@OwnerDisplayName")]
   owner_display_name: Option<String>,
-  #[serde(rename = "@LastEditorUserId")]
-  last_editor_user_id: Option<String>,
+  #[serde(rename = "@LastEditorUserId", deserialize_with = "from_string_optional", default)]
+  last_editor_user_id: Option<i64>,
   #[serde(rename = "@LastEditorDisplayName")]
   last_editor_display_name: Option<String>,
   #[serde(deserialize_with = "from_rfc3339_without_timezone", default)]
@@ -276,18 +339,18 @@ pub struct Posts {
 
 #[derive(Debug, Deserialize, Serialize)]
 pub struct Tag {
-  #[serde(rename = "@Id")]
-  id: String,
+  #[serde(rename = "@Id", deserialize_with = "from_string")]
+  id: i64,
   #[serde(rename = "@TagName")]
   tag_name: String,
   #[serde(rename = "@Count")]
   count: i64,
   // if an Excerpt is created
-  #[serde(rename = "@ExcerptPostId")]
-  excerpt_post_id: Option<String>,
+  #[serde(rename = "@ExcerptPostId", deserialize_with = "from_string_optional", default)]
+  excerpt_post_id: Option<i64>,
   // if an Wiki is created
-  #[serde(rename = "@WikiPostId")]
-  wiki_post_id: Option<String>,
+  #[serde(rename = "@WikiPostId", deserialize_with = "from_string_optional", default)]
+  wiki_post_id: Option<i64>,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -297,8 +360,8 @@ pub struct Tags {
 
 #[derive(Debug, Deserialize, Serialize)]
 pub struct User {
-  #[serde(rename = "@Id")]
-  id: String,
+  #[serde(rename = "@Id", deserialize_with = "from_string")]
+  id: i64,
   #[serde(rename = "@Reputation")]
   reputation: i64,
   #[serde(with = "NaiveDateTime")]
@@ -327,8 +390,8 @@ pub struct User {
   up_votes: u32,
   #[serde(rename = "@DownVotes")]
   down_votes: u32,
-  #[serde(rename = "@AccountId")]
-  account_id: Option<String>,
+  #[serde(rename = "@AccountId", deserialize_with = "from_string_optional", default)]
+  account_id: Option<i64>,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -360,15 +423,15 @@ pub enum VoteType {
 pub struct Vote {
  #[serde(rename = "@Id")]
  id: String,
- #[serde(rename = "@PostId")]
- post_id: String,
+ #[serde(rename = "@PostId", deserialize_with = "from_string")]
+ post_id: i64,
  #[serde(rename = "@VoteTypeId")]
  vote_type_id: VoteType,
  #[serde(rename = "@CreationDate")]
  creation_date: NaiveDateTime,
  // only for VoteTypeId 5
- #[serde(rename = "@UserId")]
- user_id: Option<String>,
+ #[serde(rename = "@UserId", deserialize_with = "from_string_optional", default)]
+ user_id: Option<i64>,
  // only for VoteTypeId 9
  #[serde(rename = "@BountyAmount")]
  bounty_amount: Option<String>,

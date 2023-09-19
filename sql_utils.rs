@@ -71,7 +71,7 @@ impl Display for Error {
     match self {
       Error::Message(msg) => formatter.write_str(msg),
       Error::Eof => formatter.write_str("unexpected end of input"),
-      _ => Ok(()),
+      _ => formatter.write_str("some sort of error"),
     }
   }
 }
@@ -278,13 +278,13 @@ fn sanitize_key(key: &str) -> String {
   key.chars()
     // Remove the initial @ of XML structs.
     .filter(|c| *c != '@')
-  // Convert PamelCase to snake_case
+  // Convert PascalCase to snake_case
     .map(|c| if c.is_ascii_uppercase() {
       if first {
         first = false;
-        format!("{}", c.to_lowercase() )
+        format!("{}", c.to_lowercase())
       } else {
-        format!("_{}", c.to_lowercase() )
+        format!("_{}", c.to_lowercase())
       }
     } else {
       format!("{}", c)

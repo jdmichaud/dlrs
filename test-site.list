@@ -9,6 +9,6 @@ bioinformatics.stackexchange.com.7z http://localhost:8080/bioinformatics.stackex
 cardano.stackexchange.com.7z http://localhost:8080/cardano.stackexchange.com.7z
 patents.meta.stackexchange.com.7z http://localhost:8080/patents.meta.stackexchange.com.7z
 tor.stackexchange.com.7z http://localhost:8080/tor.stackexchange.com.7z
-academia.stackexchange.com.7z http://localhost:8080/academia.stackexchange.com.7z
+# academia.stackexchange.com.7z http://localhost:8080/academia.stackexchange.com.7z
 # stackoverflow.com-Comments.7z http://localhost:8080/stackoverflow.com-Comments.7z
 # stackoverflow.com-PostHistory.7z http://localhost:8080/stackoverflow.com-PostHistory.7z

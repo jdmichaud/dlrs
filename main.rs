@@ -2,7 +2,7 @@
 #![feature(core_intrinsics)] // for breakpoint
 #![feature(let_chains)] // for macro
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use clap::Parser;
 use futures::StreamExt;
 use quick_xml::events::Event;
@@ -149,8 +149,7 @@ async fn download(_config: &Config, jobs: &Arc<Mutex<Vec<Job>>>, job_index: usiz
   if url == "" { return Ok(()) } // If the job is not created from the site list, not download is needed
   let filename = &jobs.lock().unwrap()[job_index].filepath.clone();
 
-let client = reqwest::Client::new();
-
+  let client = reqwest::Client::new();
   let res = client
       .get(url)
       .send()
@@ -251,7 +250,7 @@ fn inject<R: BufRead, T>(config: &Config, reader: &mut quick_xml::reader::Reader
       Ok(Event::Eof) => break,
       Ok(Event::Empty(e)) => {
         let s = format!("<{}/>", std::str::from_utf8(&e)?);
-        let tag: T = quick_xml::de::from_str(&s)?;
+        let tag: T = quick_xml::de::from_str(&s).map_err(|e| anyhow::anyhow!("{} {}", table_name, e))?;
         if count == 0 {
           let (create_stmt, insert_stmt) = sql_utils::to_init_table(&tag, table_name)?;
           connection.execute(create_stmt)?;
@@ -467,8 +466,16 @@ async fn main() -> Result<()> {
   }));
   // Restore the cursor on error
   let result = run().await;
-  if let Err(ref _e) = result { // ref here to avoid partial move outside of error
+  if let Err(ref e) = result { // ref here to avoid partial move outside of error
     let _ = crossterm::execute!(stdout(), crossterm::cursor::Show);
+    if cfg!(debug_assertions) {
+      // If in debug we want some kind of backtrace
+      panic!("{}", e)
+    } else {
+      // If in release, we want an nice error output
+      result.with_context(|| format!("could not complete execution"))
+    }
+  } else {
+    Ok(())
   }
-  result
 }
